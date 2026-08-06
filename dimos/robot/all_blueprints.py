@@ -151,6 +151,7 @@ all_blueprints = {
     "unitree-go2-webrtc-keyboard-teleop": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_webrtc_keyboard_teleop:unitree_go2_webrtc_keyboard_teleop",
     "unitree-go2-webrtc-rage-keyboard-teleop": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_webrtc_rage_keyboard_teleop:unitree_go2_webrtc_rage_keyboard_teleop",
     "unity-sim": "dimos.simulation.unity.blueprint:unity_sim",
+    "xarm-force-torque": "dimos.robot.manipulators.xarm.blueprints.force_torque:xarm_force_torque",
     "xarm-perception": "dimos.robot.manipulators.xarm.blueprints.perception:xarm_perception",
     "xarm-perception-agent": "dimos.robot.manipulators.xarm.blueprints.agentic:xarm_perception_agent",
     "xarm-perception-sim": "dimos.robot.manipulators.xarm.blueprints.simulation:xarm_perception_sim",
@@ -196,6 +197,7 @@ all_modules = {
     "fast-lio2": "dimos.hardware.sensors.lidar.fastlio2.module.FastLio2",
     "fast-lio2-recorder": "dimos.hardware.sensors.lidar.fastlio2.recorder.FastLio2Recorder",
     "front-camera": "dimos.teleop.hosted.blueprints.cloudflare.FrontCamera",
+    "ft-recorder": "dimos.hardware.sensors.force_torque.recorder.FTRecorder",
     "g1-connection": "dimos.robot.unitree.g1.connection.G1Connection",
     "g1-connection-base": "dimos.robot.unitree.g1.connection.G1ConnectionBase",
     "g1-high-level-dds-sdk": "dimos.robot.unitree.g1.effectors.high_level.dds_sdk.G1HighLevelDdsSdk",
@@ -295,5 +297,6 @@ all_modules = {
     "world-belief-module": "dimos.experimental.world_belief.worldbelief_module.WorldBeliefModule",
     "world-belief-recorder": "dimos.experimental.world_belief.worldbelief_recorder.WorldBeliefRecorder",
     "wrist-camera": "dimos.teleop.hosted.blueprints.cloudflare.WristCamera",
+    "x-arm-ft-sensor": "dimos.hardware.sensors.force_torque.read_FTModule.XArmFTSensor",
     "zed-camera": "dimos.hardware.sensors.camera.zed.camera.ZEDCamera",
 }
