@@ -197,7 +197,7 @@ all_modules = {
     "fast-lio2": "dimos.hardware.sensors.lidar.fastlio2.module.FastLio2",
     "fast-lio2-recorder": "dimos.hardware.sensors.lidar.fastlio2.recorder.FastLio2Recorder",
     "front-camera": "dimos.teleop.hosted.blueprints.cloudflare.FrontCamera",
-    "ft-recorder": "dimos.hardware.sensors.force_torque.recorder.FTRecorder",
+    "ft-recorder": "dimos.robot.manipulators.xarm.blueprints.force_torque.FTRecorder",
     "g1-connection": "dimos.robot.unitree.g1.connection.G1Connection",
     "g1-connection-base": "dimos.robot.unitree.g1.connection.G1ConnectionBase",
     "g1-high-level-dds-sdk": "dimos.robot.unitree.g1.effectors.high_level.dds_sdk.G1HighLevelDdsSdk",

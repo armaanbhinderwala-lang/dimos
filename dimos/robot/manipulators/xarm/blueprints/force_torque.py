@@ -18,11 +18,50 @@ The recorder's In ports are named for the sensor's outputs, so ``autoconnect``
 wires them directly. Query the result with ``SqliteStore(path="ft_recording.db")``.
 """
 
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic import Field
+
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.stream import In
 from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.force_torque.read_FTModule import XArmFTSensor
-from dimos.hardware.sensors.force_torque.recorder import FTRecorder
+from dimos.memory2.module import Recorder, RecorderConfig
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
+
+
+class FTRecorderConfig(RecorderConfig):
+    db_path: str | Path = "ft_recording.db"
+
+    # The FT stack publishes no tf, so there is no transform tree to record and
+    # nothing to anchor a wrench to. Left on, the Recorder would open an empty
+    # "tf" stream fed by a port nothing is connected to.
+    record_tf: bool = False
+
+    # Declaring both streams poseless is what silences the per-message "No pose
+    # for time ..." warning. Without it that fires on every observation — 100
+    # lines a second at the default 50 Hz across two streams.
+    poseless_streams: list[str] = Field(
+        default_factory=lambda: ["ext_wrench", "raw_wrench"],
+    )
+
+
+class FTRecorder(Recorder):
+    """Persists both wrench streams to SQLite, one memory2 stream per port.
+
+    In ports are named for :class:`XArmFTSensor`'s outputs, so ``autoconnect``
+    wires them without remappings. Each observation is stored with the sensor's
+    own timestamp; the wrenches carry no pose because this stack publishes no
+    tf (see the config for why that is off).
+    """
+
+    config: FTRecorderConfig
+
+    ext_wrench: In[WrenchStamped]
+    raw_wrench: In[WrenchStamped]
+
 
 xarm_force_torque = autoconnect(
     XArmFTSensor.blueprint(),
@@ -36,6 +75,3 @@ xarm_force_torque = autoconnect(
         ("raw_wrench", WrenchStamped): LCMTransport("/ft/raw_wrench", WrenchStamped),
     }
 )
-
-if __name__ == "__main__":
-    xarm_force_torque.build().loop()
