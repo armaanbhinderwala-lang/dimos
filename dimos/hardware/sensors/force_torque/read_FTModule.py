@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import socket
 import time
 
 from pydantic import Field
@@ -35,6 +37,11 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
+# Mirrors the SDK's own test for "is this an IP or a serial port" (xarm/x3/base.py).
+_IPV4_RE = re.compile(
+    r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+)
+
 
 class XArmFTSensorConfig(ModuleConfig):
     """Pydantic configuration parameters for the xArm FT Sensor module."""
@@ -43,7 +50,7 @@ class XArmFTSensorConfig(ModuleConfig):
     ip: str | None = Field(default_factory=lambda: os.environ.get("DIMOS_XARM_IP", "192.168.1.197"))
 
     # Telemetry sampling rate (Hz)
-    frequency: float = Field(default=1, gt=0.0)
+    frequency: float = Field(default=100, gt=0.0)
 
     # Frame metadata. Both streams share it: raw and compensated are the same
     # sensor in the same frame, and the two topics already tell them apart.
@@ -69,13 +76,13 @@ class XArmFTSensor(Module):
     @rpc
     def start(self) -> None:
         """Lifecycle hook to initialize hardware connection and start streaming loops."""
-        self._validate_network()
+        ip = self._resolve_ip()
         super().start()
 
         # Connect to xArm hardware API
-        arm = XArmAPI(self.config.ip)
+        arm = XArmAPI(ip)
         if not arm.connected:
-            raise RuntimeError(f"XArmFTSensor: Could not connect to arm at IP {self.config.ip}")
+            raise RuntimeError(f"XArmFTSensor: Could not connect to arm at IP {ip}")
 
         # Enable the physical FT sensor peripheral
         code = arm.set_ft_sensor_enable(1)
@@ -104,7 +111,7 @@ class XArmFTSensor(Module):
         logger.info(
             "XArmFTSensor streaming at %.1f Hz from %s (frame %s)",
             self.config.frequency,
-            self.config.ip,
+            ip,
             self.frame_id,
         )
 
@@ -161,9 +168,33 @@ class XArmFTSensor(Module):
 
             await asyncio.sleep(interval)
 
-    def _validate_network(self) -> None:
-        """Validates that a valid target IP has been configured."""
-        if not self.config.ip:
+    def _resolve_ip(self) -> str:
+        """Return a literal IPv4 address for the configured host.
+
+        The SDK only speaks TCP when handed ``localhost`` or a dotted-quad
+        IPv4; anything else it treats as a serial device path and dies with
+        "serial module is not found, ... pip install pyserial", which says
+        nothing about the real problem. Resolving here keeps hostnames usable
+        and turns a bad value into an error that names it.
+        """
+        ip = (self.config.ip or "").strip()
+        if not ip:
             raise RuntimeError(
-                "XArmFTSensor: ip not set. Set it in the config or via DIMOS_XARM_IP environment variable."
+                "XArmFTSensor: ip not set. Set it in the config or via DIMOS_XARM_IP "
+                "environment variable."
             )
+        if ip == "localhost" or _IPV4_RE.match(ip):
+            return ip
+
+        try:
+            resolved = socket.gethostbyname(ip)
+        except OSError as error:
+            raise RuntimeError(
+                f"XArmFTSensor: {ip!r} is neither an IPv4 address nor a resolvable "
+                f"hostname ({error}). The xArm SDK connects over TCP only to a literal "
+                "IP; anything else it tries to open as a serial port. Set the arm's "
+                "address via DIMOS_XARM_IP or --ip."
+            ) from error
+
+        logger.info("XArmFTSensor: resolved %s to %s", ip, resolved)
+        return resolved

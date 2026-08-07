@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Real Force-Torque Sensor Data Stream, recorded to a memory2 SQLite db.
+"""Real Force-Torque Sensor Data Stream, recorded and graphed live.
 
-The recorder's In ports are named for the sensor's outputs, so ``autoconnect``
-wires them directly. Query the result with ``SqliteStore(path="ft_recording.db")``.
+Both consumers' In ports are named for the sensor's outputs, so ``autoconnect``
+wires them directly and each wrench fans out to both:
+
+- :class:`FTRecorder` persists it to a memory2 SQLite db. Query the result with
+  ``SqliteStore(path="ft_recording.db")``.
+- :class:`WrenchPlotter` graphs force and torque per axis in Rerun as it arrives.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.force_torque.read_FTModule import XArmFTSensor
 from dimos.memory2.module import Recorder, RecorderConfig
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
+from dimos.visualization.wrench_plotter import WrenchPlotter
 
 
 class FTRecorderConfig(RecorderConfig):
@@ -69,6 +74,7 @@ xarm_force_torque = autoconnect(
     # defaults, so RecorderConfig._resolve_path only fires for an explicit value.
     # Without this the db lands relative to the worker's cwd instead of the repo.
     FTRecorder.blueprint(db_path="ft_recording.db"),
+    WrenchPlotter.blueprint(),
 ).transports(
     {
         ("ext_wrench", WrenchStamped): LCMTransport("/ft/ext_wrench", WrenchStamped),
