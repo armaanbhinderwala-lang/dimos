@@ -50,7 +50,7 @@ class XArmFTSensorConfig(ModuleConfig):
     ip: str | None = Field(default_factory=lambda: os.environ.get("DIMOS_XARM_IP", "192.168.1.197"))
 
     # Telemetry sampling rate (Hz)
-    frequency: float = Field(default=100, gt=0.0)
+    frequency: float = Field(default=1000, gt=0.0)
 
     # Frame metadata. Both streams share it: raw and compensated are the same
     # sensor in the same frame, and the two topics already tell them apart.
