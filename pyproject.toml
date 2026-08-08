@@ -277,6 +277,7 @@ manipulation = [
     # Hardware SDKs
     "piper-sdk",
     "pyrealsense2-extended; sys_platform != 'darwin'",
+    "pyserial>=3.4",  # OpenFT 16-channel FT sensor MCU (dimos/hardware/sensors/force_torque/openft_module.py)
     "xarm-python-sdk>=1.17.0",
     "a750-control; sys_platform == 'linux' and platform_machine == 'x86_64'",
 
@@ -613,6 +614,8 @@ module = [
     "scipy",
     "scipy.*",
     "sensor_msgs.*",
+    "serial",
+    "serial.*",
     "sqlite_vec",
     "std_msgs.*",
     "tf2_msgs.*",
