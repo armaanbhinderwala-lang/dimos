@@ -16,7 +16,7 @@
 """
 Handle Grab Module Test/Deployment Script
 
-Deploys and connects the ZED camera module and handle grab skill module using Dimos.
+Deploys and connects the RealSense camera module and handle grab skill module using Dimos.
 """
 
 import time
@@ -24,8 +24,7 @@ import argparse
 from dimos.core import start, LCMTransport
 from dimos.utils.logging_config import setup_logger
 from dimos.msgs.sensor_msgs import Image, CameraInfo
-from dimos.msgs.geometry_msgs import PoseStamped
-from dimos.hardware.zed_camera import ZEDModule
+from dimos.hardware.realsense_module import RealsenseModule
 from dimos.hardware.handle_grab_skill import HandleGrabModule
 from dimos.agents2.agent import Agent
 from dimos.agents2.cli.human import HumanInput
@@ -36,7 +35,7 @@ logger = setup_logger(__name__)
 def main():
     """Main deployment function for handle grab system."""
     parser = argparse.ArgumentParser(
-        description="Deploy ZED camera and handle grab skill modules",
+        description="Deploy RealSense camera and handle grab skill modules",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -92,47 +91,26 @@ Examples:
         "--grab", action="store_true", help="Execute grab sequence after positioning"
     )
 
-    # ZED camera arguments
-    parser.add_argument("--camera-id", type=int, default=0, help="ZED camera ID (default: 0)")
-    parser.add_argument(
-        "--resolution",
-        type=str,
-        default="HD720",
-        choices=["HD720", "HD1080", "HD2K", "VGA"],
-        help="ZED camera resolution (default: HD720)",
-    )
-    parser.add_argument(
-        "--depth-mode",
-        type=str,
-        default="NEURAL",
-        choices=["NEURAL", "ULTRA", "QUALITY", "PERFORMANCE"],
-        help="ZED depth mode (default: NEURAL)",
-    )
+    # RealSense camera arguments
+    parser.add_argument("--width", type=int, default=1280, help="Camera width (default: 1280)")
+    parser.add_argument("--height", type=int, default=720, help="Camera height (default: 720)")
     parser.add_argument("--fps", type=int, default=30, help="Camera frame rate (default: 30)")
-    parser.add_argument(
-        "--enable-tracking", action="store_true", help="Enable ZED positional tracking"
-    )
 
     # LCM transport arguments
     parser.add_argument(
         "--lcm-color-channel",
-        default="/zed/color_image",
-        help="LCM channel for color image data (default: /zed/color_image)",
+        default="/camera/color_image",
+        help="LCM channel for color image data (default: /camera/color_image)",
     )
     parser.add_argument(
         "--lcm-depth-channel",
-        default="/zed/depth_image",
-        help="LCM channel for depth image data (default: /zed/depth_image)",
+        default="/camera/depth_image",
+        help="LCM channel for depth image data (default: /camera/depth_image)",
     )
     parser.add_argument(
         "--lcm-info-channel",
-        default="/zed/camera_info",
-        help="LCM channel for camera info (default: /zed/camera_info)",
-    )
-    parser.add_argument(
-        "--lcm-pose-channel",
-        default="/zed/pose",
-        help="LCM channel for camera pose (default: /zed/pose)",
+        default="/camera/camera_info",
+        help="LCM channel for camera info (default: /camera/camera_info)",
     )
 
     # Execution mode
@@ -155,6 +133,9 @@ Examples:
         help="Run without visualization (useful for headless systems)",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument(
+        "--xarm7", action="store_true", help="Use the 7-DOF xArm7 URDF/joint set instead of xArm6"
+    )
 
     args = parser.parse_args()
 
@@ -165,36 +146,28 @@ Examples:
     logger.info(f"Starting Dimos with {args.processes} processes...")
     dimos = start(args.processes)
 
-    # Deploy ZED module
-    logger.info("Deploying ZED camera module...")
-    logger.info(f"  Camera ID: {args.camera_id}")
-    logger.info(f"  Resolution: {args.resolution}")
-    logger.info(f"  Depth mode: {args.depth_mode}")
+    # Deploy RealSense module
+    logger.info("Deploying RealSense camera module...")
+    logger.info(f"  Resolution: {args.width}x{args.height}")
     logger.info(f"  FPS: {args.fps}")
-    logger.info(f"  Tracking: {'Enabled' if args.enable_tracking else 'Disabled'}")
 
-    zed = dimos.deploy(
-        ZEDModule,
-        camera_id=args.camera_id,
-        resolution=args.resolution,
-        depth_mode=args.depth_mode,
+    camera = dimos.deploy(
+        RealsenseModule,
+        width=args.width,
+        height=args.height,
         fps=args.fps,
-        enable_tracking=args.enable_tracking,
-        publish_rate=args.fps,
-        frame_id="zed_camera",
+        verbose=args.verbose,
     )
 
-    # Set up LCM transports for ZED outputs
-    zed.color_image.transport = LCMTransport(args.lcm_color_channel, Image)
-    zed.depth_image.transport = LCMTransport(args.lcm_depth_channel, Image)
-    zed.camera_info.transport = LCMTransport(args.lcm_info_channel, CameraInfo)
-    zed.pose.transport = LCMTransport(args.lcm_pose_channel, PoseStamped)
+    # Set up LCM transports for camera outputs
+    camera.color_image.transport = LCMTransport(args.lcm_color_channel, Image)
+    camera.depth_image.transport = LCMTransport(args.lcm_depth_channel, Image)
+    camera.camera_info.transport = LCMTransport(args.lcm_info_channel, CameraInfo)
 
-    logger.info("ZED LCM channels configured:")
+    logger.info("Camera LCM channels configured:")
     logger.info(f"  Color: {args.lcm_color_channel}")
     logger.info(f"  Depth: {args.lcm_depth_channel}")
     logger.info(f"  Info: {args.lcm_info_channel}")
-    logger.info(f"  Pose: {args.lcm_pose_channel}")
 
     # Deploy handle grab module
     logger.info("Deploying handle grab module...")
@@ -207,22 +180,24 @@ Examples:
         fastsam_model_path=args.fastsam_model,
         xarm_ip=args.xarm,
         test_mode=args.test,
+        num_arm_joints=7 if args.xarm7 else 6,
+        urdf_filename="xarm7_openft_gripper.urdf" if args.xarm7 else "xarm6_openft_gripper.urdf",
     )
 
-    # Connect handle grab inputs to ZED outputs
-    handle_grab.color_image.connect(zed.color_image)
-    handle_grab.depth_image.connect(zed.depth_image)
-    handle_grab.camera_info.connect(zed.camera_info)
-    logger.info("Connected handle grab module to ZED data streams (color, depth, camera_info)")
+    # Connect handle grab inputs to camera outputs
+    handle_grab.color_image.connect(camera.color_image)
+    handle_grab.depth_image.connect(camera.depth_image)
+    handle_grab.camera_info.connect(camera.camera_info)
+    logger.info("Connected handle grab module to camera data streams (color, depth, camera_info)")
 
     # Start modules
     logger.info("=" * 60)
     logger.info("Starting modules...")
     logger.info("=" * 60)
 
-    # Start ZED camera
-    zed.start()
-    logger.info("ZED camera started")
+    # Start RealSense camera
+    camera.start()
+    logger.info("RealSense camera started")
 
     # Start handle grab module
     handle_grab.start()
@@ -317,21 +292,9 @@ Examples:
 
                     # Print stats every 10 seconds
                     if time.time() - last_print_time > 10:
-                        # Get ZED camera info
-                        zed_info = zed.get_camera_info()
-                        if zed_info:
-                            logger.info(f"ZED Camera: {zed_info.get('model', 'Unknown')}")
-
-                    # Get pose if tracking enabled
-                    if args.enable_tracking:
-                        pose = zed.get_pose()
-                        if pose and pose.get("valid", False):
-                            pos = pose.get("position", [0, 0, 0])
-                            logger.info(
-                                f"Camera position: X={pos[0]:.2f}, Y={pos[1]:.2f}, Z={pos[2]:.2f}"
-                            )
-
-                    last_print_time = time.time()
+                        stats = camera.get_stats()
+                        logger.info(f"Camera stats: {stats}")
+                        last_print_time = time.time()
 
             except KeyboardInterrupt:
                 logger.info("\n" + "=" * 60)
@@ -341,7 +304,7 @@ Examples:
     # Cleanup
     if not args.interactive:
         # Stop modules
-        zed.stop()
+        camera.stop()
         handle_grab.cleanup()
 
         # Shutdown Dimos

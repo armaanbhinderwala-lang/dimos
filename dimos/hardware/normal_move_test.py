@@ -16,7 +16,7 @@
 """
 Normal-based IK Motion Test
 ===========================
-This script captures a frame from the ZED camera, allows the user to select
+This script captures a frame from the RealSense camera, allows the user to select
 a point on a handle, segments it using FastSAM, performs mesh reconstruction,
 calculates the normal vector at the selected point, transforms it to the base frame,
 and computes an IK solution to align the end-effector with the handle.
@@ -24,7 +24,6 @@ and computes an IK solution to align the end-effector with the handle.
 
 import numpy as np
 import cv2
-import pyzed.sl as sl
 import torch
 import open3d as o3d
 from pathlib import Path
@@ -53,6 +52,7 @@ from PIL import Image
 # Add FastSAM to path
 sys.path.insert(0, os.path.dirname(__file__))
 from fastsam_wrapper import FastSAMWrapper
+from realsense_camera import RealsenseCamera
 
 # Drake imports
 from pydrake.all import (
@@ -89,6 +89,8 @@ class NormalMoveTest:
         use_qwen: bool = False,
         loop_count: int = 1,
         execute_grab: bool = False,
+        num_arm_joints: int = 6,
+        urdf_filename: str = "xarm6_openft_gripper.urdf",
     ):
         """Initialize the test system
 
@@ -99,8 +101,13 @@ class NormalMoveTest:
             use_qwen: If True, use Qwen vision model to automatically detect handle point
             loop_count: Number of times to repeat the detection and movement cycle
             execute_grab: If True, execute grab sequence after final positioning
+            num_arm_joints: 6 for xArm6, 7 for xArm7 -- must match urdf_filename.
+            urdf_filename: URDF file (in this directory) describing the arm.
         """
-        self.zed = None
+        self.camera = None
+        # PLACEHOLDER extrinsic (tool frame -> camera optical frame), identity + no offset.
+        # Needs real hand-eye calibration once the RealSense is mounted; see FT_CALIBRATION_MATH.md.
+        self.camera_extrinsic = RigidTransform(RotationMatrix(), [0.0, 0.0, 0.0])
         self.fastsam_model = None
         self.fastsam_model_path = fastsam_model_path
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -109,6 +116,8 @@ class NormalMoveTest:
         self.use_qwen = use_qwen
         self.loop_count = loop_count
         self.execute_grab = execute_grab
+        self.num_arm_joints = num_arm_joints
+        self.urdf_filename = urdf_filename
         self.arm = None
         self.xarm_positions = None
 
@@ -163,38 +172,15 @@ class NormalMoveTest:
         self.setup_drake_simulation()
 
     def _init_camera(self):
-        """Initialize ZED camera"""
+        """Initialize RealSense camera"""
         try:
-            self.zed = sl.Camera()
-
-            # Configure camera parameters
-            init_params = sl.InitParameters()
-            init_params.camera_resolution = sl.RESOLUTION.HD720
-            init_params.camera_fps = 30
-            init_params.depth_mode = sl.DEPTH_MODE.NEURAL
-            init_params.coordinate_units = sl.UNIT.MILLIMETER
-            init_params.depth_minimum_distance = 100  # 10cm minimum
-            init_params.depth_maximum_distance = 3000  # 3m maximum
-
-            # Open camera
-            status = self.zed.open(init_params)
-            if status != sl.ERROR_CODE.SUCCESS:
-                raise RuntimeError(f"Failed to open ZED camera: {status}")
-
-            # Set runtime parameters
-            self.runtime_params = sl.RuntimeParameters()
-            self.runtime_params.confidence_threshold = 50
-            self.runtime_params.enable_fill_mode = True
-
-            # Get camera info
-            cam_info = self.zed.get_camera_information()
-            self.img_width = cam_info.camera_configuration.resolution.width
-            self.img_height = cam_info.camera_configuration.resolution.height
-
-            logger.info("ZED camera initialized successfully")
-
+            self.camera = RealsenseCamera(width=1280, height=720, fps=30)
+            self.camera.open()
+            self.img_width = self.camera.width
+            self.img_height = self.camera.height
+            logger.info("RealSense camera initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize ZED camera: {e}")
+            logger.error(f"Failed to initialize RealSense camera: {e}")
             raise
 
     def _init_fastsam(self):
@@ -211,7 +197,7 @@ class NormalMoveTest:
             logger.error(f"Failed to initialize FastSAM: {e}")
 
     def setup_drake_simulation(self):
-        """Setup Drake simulation with the xarm6_openft_gripper robot."""
+        """Setup Drake simulation with the robot described by self.urdf_filename."""
         # Clear meshcat
         self.meshcat.Delete()
         self.meshcat.DeleteAddedControls()
@@ -228,7 +214,7 @@ class NormalMoveTest:
         parser.package_map().Add("dim_cpp", os.path.join(package_path, "dim_cpp"))
 
         # Load the URDF
-        urdf_path = os.path.join(package_path, "xarm6_openft_gripper.urdf")
+        urdf_path = os.path.join(package_path, self.urdf_filename)
         self.model_instances = parser.AddModels(urdf_path)
         self.model_instance = self.model_instances[0] if self.model_instances else None
 
@@ -236,24 +222,24 @@ class NormalMoveTest:
         try:
             self.base_frame = self.plant.world_frame()
 
-            # Try to use link_openft (gripper frame) if available, otherwise use link6
+            # Fall back to the arm's last link if link_openft isn't in the URDF
+            last_link_name = f"link{self.num_arm_joints}"
             try:
                 self.tool_frame = self.plant.GetFrameByName("link_openft")
                 self.tool_body = self.plant.GetBodyByName("link_openft")
                 logger.info("Using link_openft as tool frame")
             except:
-                self.tool_frame = self.plant.GetFrameByName("link6")
-                self.tool_body = self.plant.GetBodyByName("link6")
-                logger.info("Using link6 as tool frame")
+                self.tool_frame = self.plant.GetFrameByName(last_link_name)
+                self.tool_body = self.plant.GetBodyByName(last_link_name)
+                logger.info(f"Using {last_link_name} as tool frame")
 
             # For backward compatibility, keep link6_frame reference
             self.link6_frame = self.tool_frame
             self.link6_body = self.tool_body
 
-            self.zed_frame = self.plant.GetFrameByName("zed_left_camera_optical_frame")
-            logger.info(
-                "Found all required frames: base, tool (link_openft/link6), zed_left_camera_optical_frame"
-            )
+            # Camera frame comes from tool_frame + self.camera_extrinsic, not a URDF lookup
+            # (no calibrated RealSense mount frame exists yet)
+            logger.info("Found all required frames: base, tool (link_openft/link6)")
         except Exception as e:
             logger.error(f"Error finding frames: {e}")
             raise
@@ -279,7 +265,7 @@ class NormalMoveTest:
         # Use xARM positions if available
         if self.xarm_positions is not None:
             logger.info("\nSetting Drake to actual xARM joint positions:")
-            arm_joint_names = [f"joint{i + 1}" for i in range(6)]
+            arm_joint_names = [f"joint{i + 1}" for i in range(self.num_arm_joints)]
             for i, joint_name in enumerate(arm_joint_names):
                 try:
                     joint = self.plant.GetJointByName(joint_name)
@@ -290,13 +276,13 @@ class NormalMoveTest:
                 except Exception as e:
                     logger.error(f"  Error setting {joint_name}: {e}")
 
-            # Set gripper if we have 7th value
-            if len(self.xarm_positions) > 6:
+            # Set gripper if there's a trailing value after the arm joints
+            if len(self.xarm_positions) > self.num_arm_joints:
                 try:
                     gripper_joint = self.plant.GetJointByName("drive_joint")
                     gripper_index = gripper_joint.position_start()
-                    initial_positions[gripper_index] = self.xarm_positions[6]
-                    logger.info(f"  gripper: {self.xarm_positions[6]:.3f}")
+                    initial_positions[gripper_index] = self.xarm_positions[self.num_arm_joints]
+                    logger.info(f"  gripper: {self.xarm_positions[self.num_arm_joints]:.3f}")
                 except:
                     pass
         else:
@@ -313,31 +299,9 @@ class NormalMoveTest:
         logger.info("Drake simulation setup complete")
 
     def capture_frame(self):
-        """Capture a frame from the ZED camera"""
-        image = sl.Mat()
-        depth = sl.Mat()
-        point_cloud = sl.Mat()
-
-        # Warm up camera
+        """Capture a frame from the RealSense camera"""
         logger.info("Warming up camera...")
-        for _ in range(5):
-            self.zed.grab(self.runtime_params)
-
-        # Capture frame
-        if self.zed.grab(self.runtime_params) != sl.ERROR_CODE.SUCCESS:
-            raise RuntimeError("Failed to grab frame from camera")
-
-        # Retrieve data
-        self.zed.retrieve_image(image, sl.VIEW.LEFT)
-        self.zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
-        self.zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
-
-        # Convert BGRA to RGB
-        image_data = image.get_data()
-        if len(image_data.shape) == 3 and image_data.shape[2] == 4:
-            rgb_image = cv2.cvtColor(image_data, cv2.COLOR_BGRA2RGB)
-        else:
-            rgb_image = image_data[:, :, :3]
+        rgb_image, depth, point_cloud = self.camera.capture(warmup_frames=5)
 
         # Store current frame data
         self._current_rgb = rgb_image.copy()
@@ -345,8 +309,7 @@ class NormalMoveTest:
         self._current_pointcloud = point_cloud
 
         # Log depth statistics
-        depth_data = depth.get_data()
-        valid_depth = depth_data[np.isfinite(depth_data)]
+        valid_depth = depth[np.isfinite(depth)]
         if len(valid_depth) > 0:
             logger.info(f"Depth range: [{np.min(valid_depth):.1f}, {np.max(valid_depth):.1f}] mm")
 
@@ -515,9 +478,9 @@ class NormalMoveTest:
 
         return mask
 
-    def extract_segmented_pointcloud(self, point_cloud_mat, mask):
+    def extract_segmented_pointcloud(self, point_cloud, mask):
         """Extract 3D points corresponding to the segmented mask"""
-        pc_data = point_cloud_mat.get_data()
+        pc_data = point_cloud
         mask_indices = np.where(mask > 0)
 
         points = []
@@ -608,7 +571,7 @@ class NormalMoveTest:
         mesh_normals = np.asarray(mesh.vertex_normals)
         normal = mesh_normals[closest_vertex_idx]
 
-        # ZED camera looks along positive Z axis, so normal should point back towards camera
+        # Camera looks along positive Z axis (standard optical frame convention)
         # For a handle facing the camera, we want the normal pointing outward from the surface
         # towards the camera (negative Z in camera frame)
         if normal[2] > 0:
@@ -643,8 +606,9 @@ class NormalMoveTest:
         # Get current robot configuration
         q = self.plant.GetPositions(self.plant_context)
 
-        # Get transform from camera frame to world (base) frame
-        X_WC = self.plant.CalcRelativeTransform(self.plant_context, self.base_frame, self.zed_frame)
+        # Camera frame = tool frame + camera_extrinsic (no calibrated URDF frame for it yet)
+        X_WT = self.plant.CalcRelativeTransform(self.plant_context, self.base_frame, self.tool_frame)
+        X_WC = X_WT @ self.camera_extrinsic
 
         # Convert point from mm to m
         point_camera_m = point_camera / 1000.0
@@ -836,7 +800,7 @@ class NormalMoveTest:
 
         # Add a slightly perturbed version of current position
         q_perturbed = q_initial.copy()
-        for i in range(6):
+        for i in range(self.num_arm_joints):
             joint = self.plant.GetJointByName(f"joint{i + 1}")
             idx = joint.position_start()
             q_perturbed[idx] += np.random.uniform(-0.1, 0.1)  # Small random perturbation
@@ -855,7 +819,7 @@ class NormalMoveTest:
 
                 # Verify the solution is reasonable
                 joint_limits_ok = True
-                for i in range(6):
+                for i in range(self.num_arm_joints):
                     joint = self.plant.GetJointByName(f"joint{i + 1}")
                     idx = joint.position_start()
                     angle = q_solution[idx]
@@ -1182,7 +1146,7 @@ class NormalMoveTest:
             logger.info("Applied IK solution to robot")
 
             # Log joint angles
-            joint_names = [f"joint{i + 1}" for i in range(6)]
+            joint_names = [f"joint{i + 1}" for i in range(self.num_arm_joints)]
             for i, name in enumerate(joint_names):
                 if i < len(q_solution):
                     logger.info(f"  {name}: {np.degrees(q_solution[i]):.2f} deg")
@@ -1479,7 +1443,7 @@ class NormalMoveTest:
             logger.info(f"Iteration {iteration_num}/{self.loop_count}")
             logger.info("=" * 60)
             # 1. Capture frame
-            logger.info("Capturing frame from ZED camera...")
+            logger.info("Capturing frame from RealSense camera...")
             rgb_image, depth_map, point_cloud = self.capture_frame()
 
             # Save debug image
@@ -1522,8 +1486,7 @@ class NormalMoveTest:
             mesh = self.reconstruct_mesh(pcd)
 
             # 7. Find normal at selected point
-            pc_data = point_cloud.get_data()
-            selected_3d = pc_data[selected_point[1], selected_point[0]][:3]
+            selected_3d = point_cloud[selected_point[1], selected_point[0]][:3]
             normal_camera, closest_point = self.find_normal_at_point(mesh, selected_point)
 
             if normal_camera is None:
@@ -1681,12 +1644,12 @@ class NormalMoveTest:
             arm.clean_error()
             arm.clean_warn()
 
-            # Get current joint angles (6 DOF)
+            # Get current joint angles
             code, angles = arm.get_servo_angle(is_radian=True)
 
             if code == 0 and angles:
                 logger.info(f"Got xARM joint positions:")
-                for i, angle in enumerate(angles[:6]):
+                for i, angle in enumerate(angles[: self.num_arm_joints]):
                     logger.info(f"  joint{i + 1}: {angle:.4f} rad ({np.degrees(angle):.2f} deg)")
 
                 # Try to get gripper position
@@ -1695,7 +1658,7 @@ class NormalMoveTest:
                     if code_gripper == 0:
                         gripper_rad = gripper_pos / 1000.0  # Rough conversion
                         logger.info(f"  gripper: {gripper_pos:.1f} mm (~{gripper_rad:.3f} rad)")
-                        result = list(angles[:6])
+                        result = list(angles[: self.num_arm_joints])
                         result.append(gripper_rad)
                         arm.disconnect()
                         return result
@@ -1703,7 +1666,7 @@ class NormalMoveTest:
                     pass
 
                 arm.disconnect()
-                return angles[:6]
+                return angles[: self.num_arm_joints]
             else:
                 logger.error(f"Failed to get xARM positions, code: {code}")
 
@@ -1729,8 +1692,8 @@ class NormalMoveTest:
             return
 
         try:
-            # Extract joint angles for xARM (first 6 joints)
-            arm_joint_names = [f"joint{i + 1}" for i in range(6)]
+            # Extract arm joint angles for xARM
+            arm_joint_names = [f"joint{i + 1}" for i in range(self.num_arm_joints)]
             positions = []
 
             for joint_name in arm_joint_names:
@@ -1879,9 +1842,9 @@ class NormalMoveTest:
 
     def cleanup(self):
         """Clean up resources"""
-        if self.zed:
-            self.zed.close()
-            logger.info("ZED camera closed")
+        if self.camera:
+            self.camera.close()
+            logger.info("RealSense camera closed")
 
         if self.arm:
             self.arm.disconnect()
@@ -1923,6 +1886,11 @@ def main():
         action="store_true",
         help="Execute grab sequence after positioning: move up, forward, and close gripper",
     )
+    parser.add_argument(
+        "--xarm7",
+        action="store_true",
+        help="Use the 7-DOF xArm7 URDF/joint set instead of the xArm6 default",
+    )
 
     args = parser.parse_args()
 
@@ -1934,6 +1902,8 @@ def main():
         use_qwen=args.qwen,
         loop_count=args.loop,
         execute_grab=args.grab,
+        num_arm_joints=7 if args.xarm7 else 6,
+        urdf_filename="xarm7_openft_gripper.urdf" if args.xarm7 else "xarm6_openft_gripper.urdf",
     )
 
     try:

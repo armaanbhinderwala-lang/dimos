@@ -77,7 +77,7 @@ logger = setup_logger(__name__)
 class HandleGrabModule(Module):
     """Module for handle detection and grabbing using vision-based approach."""
 
-    # Input ports for ZED data
+    # Input ports for camera data
     color_image: In[Image] = None
     depth_image: In[Image] = None
     camera_info: In[Any] = None  # Camera calibration info
@@ -87,6 +87,8 @@ class HandleGrabModule(Module):
         fastsam_model_path: str = "./weights/FastSAM-x.pt",
         xarm_ip: str = None,
         test_mode: bool = False,
+        num_arm_joints: int = 6,
+        urdf_filename: str = "xarm6_openft_gripper.urdf",
         **kwargs,
     ):
         """Initialize the handle grab module.
@@ -95,6 +97,8 @@ class HandleGrabModule(Module):
             fastsam_model_path: Path to FastSAM model weights
             xarm_ip: IP address of xARM robot (None for simulation only)
             test_mode: If True, only get positions from xARM but don't execute movements
+            num_arm_joints: 6 for xArm6, 7 for xArm7 -- must match urdf_filename.
+            urdf_filename: URDF file (in this directory) describing the arm.
         """
         super().__init__(**kwargs)
 
@@ -102,10 +106,15 @@ class HandleGrabModule(Module):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.xarm_ip = xarm_ip
         self.test_mode = test_mode
+        self.num_arm_joints = num_arm_joints
+        self.urdf_filename = urdf_filename
         self.arm = None
         self.xarm_positions = None
+        # PLACEHOLDER extrinsic (tool frame -> camera optical frame), identity + no offset.
+        # Needs real hand-eye calibration once the RealSense is mounted; see FT_CALIBRATION_MATH.md.
+        self.camera_extrinsic = RigidTransform(RotationMatrix(), [0.0, 0.0, 0.0])
 
-        # Storage for latest ZED data
+        # Storage for latest camera data
         self._latest_rgb = None
         self._latest_depth = None
         self._camera_intrinsics = None
@@ -177,10 +186,10 @@ class HandleGrabModule(Module):
 
     @rpc
     def start(self):
-        """Start the module and subscribe to ZED data."""
+        """Start the module and subscribe to camera data."""
         logger.info("Starting HandleGrab module")
 
-        # Subscribe to ZED data streams
+        # Subscribe to camera data streams
         if self.color_image:
             self.color_image.subscribe(self._on_color_image)
             logger.info("Subscribed to color image stream")
@@ -235,7 +244,7 @@ class HandleGrabModule(Module):
             logger.error(f"Error processing camera info: {e}")
 
     def wait_for_data(self, timeout: float = 5.0) -> bool:
-        """Wait for ZED data to be available.
+        """Wait for camera data to be available.
 
         Args:
             timeout: Maximum time to wait in seconds
@@ -246,7 +255,7 @@ class HandleGrabModule(Module):
         return self._has_data.wait(timeout)
 
     def get_latest_frame(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """Get the latest RGB and depth frames from ZED.
+        """Get the latest RGB and depth frames from camera.
 
         Returns:
             Tuple of (rgb_image, depth_map) or (None, None) if no data
@@ -258,7 +267,7 @@ class HandleGrabModule(Module):
             )
 
     def setup_drake_simulation(self):
-        """Setup Drake simulation with the xarm6_openft_gripper robot."""
+        """Setup Drake simulation with the robot described by self.urdf_filename."""
         # Clear meshcat
         if self.meshcat:
             self.meshcat.Delete()
@@ -276,7 +285,7 @@ class HandleGrabModule(Module):
         parser.package_map().Add("dim_cpp", os.path.join(package_path, "dim_cpp"))
 
         # Load the URDF
-        urdf_path = os.path.join(package_path, "xarm6_openft_gripper.urdf")
+        urdf_path = os.path.join(package_path, self.urdf_filename)
         self.model_instances = parser.AddModels(urdf_path)
         self.model_instance = self.model_instances[0] if self.model_instances else None
 
@@ -284,21 +293,23 @@ class HandleGrabModule(Module):
         try:
             self.base_frame = self.plant.world_frame()
 
-            # Try to use link_openft (gripper frame) if available, otherwise use link6
+            # Try to use link_openft (gripper frame) if available, otherwise
+            # fall back to the arm's last link (link6 for xArm6, link7 for xArm7)
+            last_link_name = f"link{self.num_arm_joints}"
             try:
                 self.tool_frame = self.plant.GetFrameByName("link_openft")
                 self.tool_body = self.plant.GetBodyByName("link_openft")
                 logger.info("Using link_openft as tool frame")
             except:
-                self.tool_frame = self.plant.GetFrameByName("link6")
-                self.tool_body = self.plant.GetBodyByName("link6")
-                logger.info("Using link6 as tool frame")
+                self.tool_frame = self.plant.GetFrameByName(last_link_name)
+                self.tool_body = self.plant.GetBodyByName(last_link_name)
+                logger.info(f"Using {last_link_name} as tool frame")
 
             # For backward compatibility, keep link6_frame reference
             self.link6_frame = self.tool_frame
             self.link6_body = self.tool_body
 
-            # Note: We'll need to handle camera frame transform differently since we're not directly using ZED
+            # Note: We'll need to handle camera frame transform differently since we're not directly using the camera SDK
             logger.info("Found required frames: base, tool (link_openft/link6)")
         except Exception as e:
             logger.error(f"Error finding frames: {e}")
@@ -328,7 +339,7 @@ class HandleGrabModule(Module):
         # Use xARM positions if available
         if self.xarm_positions is not None:
             logger.info("\nSetting Drake to actual xARM joint positions:")
-            arm_joint_names = [f"joint{i + 1}" for i in range(6)]
+            arm_joint_names = [f"joint{i + 1}" for i in range(self.num_arm_joints)]
             for i, joint_name in enumerate(arm_joint_names):
                 try:
                     joint = self.plant.GetJointByName(joint_name)
@@ -339,13 +350,13 @@ class HandleGrabModule(Module):
                 except Exception as e:
                     logger.error(f"  Error setting {joint_name}: {e}")
 
-            # Set gripper if we have 7th value
-            if len(self.xarm_positions) > 6:
+            # Set gripper if there's a trailing value after the arm joints
+            if len(self.xarm_positions) > self.num_arm_joints:
                 try:
                     gripper_joint = self.plant.GetJointByName("drive_joint")
                     gripper_index = gripper_joint.position_start()
-                    initial_positions[gripper_index] = self.xarm_positions[6]
-                    logger.info(f"  gripper: {self.xarm_positions[6]:.3f}")
+                    initial_positions[gripper_index] = self.xarm_positions[self.num_arm_joints]
+                    logger.info(f"  gripper: {self.xarm_positions[self.num_arm_joints]:.3f}")
                 except:
                     pass
         else:
@@ -512,12 +523,12 @@ class HandleGrabModule(Module):
             arm.clean_error()
             arm.clean_warn()
 
-            # Get current joint angles (6 DOF)
+            # Get current joint angles
             code, angles = arm.get_servo_angle(is_radian=True)
 
             if code == 0 and angles:
                 logger.info(f"Got xARM joint positions:")
-                for i, angle in enumerate(angles[:6]):
+                for i, angle in enumerate(angles[: self.num_arm_joints]):
                     logger.info(f"  joint{i + 1}: {angle:.4f} rad ({np.degrees(angle):.2f} deg)")
 
                 # Try to get gripper position
@@ -526,7 +537,7 @@ class HandleGrabModule(Module):
                     if code_gripper == 0:
                         gripper_rad = gripper_pos / 1000.0  # Rough conversion
                         logger.info(f"  gripper: {gripper_pos:.1f} mm (~{gripper_rad:.3f} rad)")
-                        result = list(angles[:6])
+                        result = list(angles[: self.num_arm_joints])
                         result.append(gripper_rad)
                         arm.disconnect()
                         return result
@@ -534,7 +545,7 @@ class HandleGrabModule(Module):
                     pass
 
                 arm.disconnect()
-                return angles[:6]
+                return angles[: self.num_arm_joints]
             else:
                 logger.error(f"Failed to get xARM positions, code: {code}")
 
@@ -555,8 +566,8 @@ class HandleGrabModule(Module):
             return
 
         try:
-            # Extract joint angles for xARM (first 6 joints)
-            arm_joint_names = [f"joint{i + 1}" for i in range(6)]
+            # Extract arm joint angles for xARM
+            arm_joint_names = [f"joint{i + 1}" for i in range(self.num_arm_joints)]
             positions = []
 
             for joint_name in arm_joint_names:
@@ -744,31 +755,9 @@ class HandleGrabModule(Module):
         # Get current robot configuration
         q = self.plant.GetPositions(self.plant_context)
 
-        # Get the ZED camera frame from the robot model
-        try:
-            zed_frame = self.plant.GetFrameByName("zed_left_camera_optical_frame")
-        except:
-            # If the frame doesn't exist in the model, log error and use approximation
-            logger.error("zed_left_camera_optical_frame not found in URDF! Using approximation")
-            # Fallback to simplified transform
-            point_camera_m = point_camera / 1000.0
-            camera_position_base = np.array([0.3, 0, 0.5])
-            R_base_camera = np.array(
-                [
-                    [0, 0, 1],  # Camera Z -> Base X
-                    [-1, 0, 0],  # Camera X -> Base -Y
-                    [0, -1, 0],  # Camera Y -> Base -Z
-                ]
-            )
-            point_base = R_base_camera @ point_camera_m + camera_position_base
-            normal_base = R_base_camera @ normal_camera
-            normal_base = normal_base / np.linalg.norm(normal_base)
-            logger.info(f"Point base (approx): {point_base}")
-            logger.info(f"Normal base (approx): {normal_base}")
-            return point_base, normal_base
-
-        # Get transform from camera frame to world (base) frame
-        X_WC = self.plant.CalcRelativeTransform(self.plant_context, self.base_frame, zed_frame)
+        # Camera frame = tool frame + camera_extrinsic (no calibrated URDF frame for it yet)
+        X_WT = self.plant.CalcRelativeTransform(self.plant_context, self.base_frame, self.tool_frame)
+        X_WC = X_WT @ self.camera_extrinsic
 
         # Convert point from mm to m
         point_camera_m = point_camera / 1000.0
@@ -841,7 +830,7 @@ class HandleGrabModule(Module):
             # Create rotation matrix
             R = np.column_stack([desired_x_axis, desired_y_axis, desired_z_axis])
         else:
-            # For link6 frame
+            # Fallback axis convention for the arm's last link; derived for link6, unverified for link7
             desired_x_axis = -normal_base  # Point towards handle
 
             world_z = np.array([0, 0, 1])
@@ -899,7 +888,7 @@ class HandleGrabModule(Module):
 
         # Add perturbed version
         q_perturbed = q_initial.copy()
-        for i in range(6):
+        for i in range(self.num_arm_joints):
             joint = self.plant.GetJointByName(f"joint{i + 1}")
             idx = joint.position_start()
             q_perturbed[idx] += np.random.uniform(-0.1, 0.1)
@@ -1150,9 +1139,9 @@ class HandleGrabModule(Module):
         # Potentially need to set this to just 1
         # loop_count = 1
         try:
-            # Wait for ZED data to be available
+            # Wait for camera data to be available
             if not self.wait_for_data(timeout=10):
-                return "Error: No ZED data available"
+                return "Error: No camera data available"
 
             successful_iterations = 0
 
@@ -1161,7 +1150,7 @@ class HandleGrabModule(Module):
                 logger.info(f"Iteration {iteration}/{loop_count}")
                 logger.info("=" * 60)
 
-                # Get latest frame from ZED
+                # Get latest frame from camera
                 rgb_image, depth_map = self.get_latest_frame()
 
                 if rgb_image is None or depth_map is None:

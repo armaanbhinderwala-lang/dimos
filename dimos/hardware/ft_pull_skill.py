@@ -82,7 +82,14 @@ class FTPullModule(Module):
     force: In[Vector3] = None  # Force vector in Newtons
     torque: In[Vector3] = None  # Torque vector in Newton-meters
 
-    def __init__(self, xarm_ip: str = None, enable_real_robot: bool = True, verbose: bool = False):
+    def __init__(
+        self,
+        xarm_ip: str = None,
+        enable_real_robot: bool = True,
+        verbose: bool = False,
+        num_arm_joints: int = 6,
+        urdf_filename: str = "xarm6_openft_gripper.urdf",
+    ):
         """
         Initialize the FT pull module.
 
@@ -90,12 +97,16 @@ class FTPullModule(Module):
             xarm_ip: IP address of the xARM robot
             enable_real_robot: Whether to control real robot
             verbose: Enable verbose output
+            num_arm_joints: 6 for xArm6, 7 for xArm7 -- must match urdf_filename.
+            urdf_filename: URDF file (in this directory) describing the arm.
         """
         super().__init__()
 
         self.xarm_ip = xarm_ip
         self.enable_real_robot = enable_real_robot
         self.verbose = verbose
+        self.num_arm_joints = num_arm_joints
+        self.urdf_filename = urdf_filename
 
         # Force-torque data storage
         self.latest_force = None
@@ -215,7 +226,7 @@ class FTPullModule(Module):
         # 5. Re-initialize Drake simulation positions if needed
         if self.plant and self.xarm_initial_positions:
             initial_positions = np.zeros(self.plant.num_positions())
-            arm_joint_names = [f"joint{i + 1}" for i in range(6)]
+            arm_joint_names = [f"joint{i + 1}" for i in range(self.num_arm_joints)]
             for i, joint_name in enumerate(arm_joint_names):
                 try:
                     joint = self.plant.GetJointByName(joint_name)
@@ -325,7 +336,7 @@ class FTPullModule(Module):
 
             if code == 0 and angles:
                 logger.info("Got xARM joint positions:")
-                for i, angle in enumerate(angles[:6]):
+                for i, angle in enumerate(angles[: self.num_arm_joints]):
                     logger.info(f"  joint{i + 1}: {np.degrees(angle):.2f} deg")
 
                 # Try to get gripper position
@@ -333,7 +344,7 @@ class FTPullModule(Module):
                     code_gripper, gripper_pos = arm.get_gripper_position()
                     if code_gripper == 0:
                         logger.info(f"  gripper: {gripper_pos:.1f} mm")
-                        result = list(angles[:6])
+                        result = list(angles[: self.num_arm_joints])
                         result.append(gripper_pos / 1000.0)
                         arm.disconnect()
                         return result
@@ -341,7 +352,7 @@ class FTPullModule(Module):
                     pass
 
                 arm.disconnect()
-                return angles[:6]
+                return angles[: self.num_arm_joints]
 
             arm.disconnect()
         except Exception as e:
@@ -350,7 +361,7 @@ class FTPullModule(Module):
         return None
 
     def setup_drake_simulation(self):
-        """Setup Drake simulation with the xarm6_openft_gripper robot."""
+        """Setup Drake simulation with the robot described by self.urdf_filename."""
         try:
             # Always start meshcat for visualization
             self.meshcat = StartMeshcat()
@@ -371,7 +382,7 @@ class FTPullModule(Module):
             parser.package_map().Add("dim_cpp", os.path.join(package_path, "dim_cpp"))
 
             # Load the URDF
-            urdf_path = os.path.join(package_path, "xarm6_openft_gripper.urdf")
+            urdf_path = os.path.join(package_path, self.urdf_filename)
             model_instances = parser.AddModels(urdf_path)
             self.model_instance = model_instances[0] if model_instances else None
 
@@ -404,7 +415,7 @@ class FTPullModule(Module):
 
             if self.xarm_initial_positions is not None:
                 logger.info("Initializing Drake with xARM joint positions")
-                arm_joint_names = [f"joint{i + 1}" for i in range(6)]
+                arm_joint_names = [f"joint{i + 1}" for i in range(self.num_arm_joints)]
                 for i, joint_name in enumerate(arm_joint_names):
                     try:
                         joint = self.plant.GetJointByName(joint_name)
@@ -414,9 +425,9 @@ class FTPullModule(Module):
                     except Exception as e:
                         logger.error(f"Error setting {joint_name}: {e}")
 
-                # Check if we have a 7th value for the gripper
-                if len(self.xarm_initial_positions) > 6:
-                    self.gripper_position = self.xarm_initial_positions[6]
+                # Check if there's a trailing gripper value after the arm joints
+                if len(self.xarm_initial_positions) > self.num_arm_joints:
+                    self.gripper_position = self.xarm_initial_positions[self.num_arm_joints]
                     logger.info(f"Got gripper position from xARM: {self.gripper_position:.3f}")
 
             # Set gripper position
@@ -797,7 +808,7 @@ class FTPullModule(Module):
         # Get current joint positions from simulation
         q = self.plant.GetPositions(self.plant_context)
 
-        arm_joint_names = [f"joint{i + 1}" for i in range(6)]
+        arm_joint_names = [f"joint{i + 1}" for i in range(self.num_arm_joints)]
         positions = []
         for joint_name in arm_joint_names:
             joint = self.plant.GetJointByName(joint_name)
@@ -1001,6 +1012,9 @@ class FTPullModule(Module):
                     self.diagram.ForcedPublish(self.diagram_context)
             elif self.arm and not self.plant:
                 # Direct xARM control without Drake (fallback)
+                # Joint indices (5,4,3 for z/y/x) are xArm6-specific, unverified for xArm7
+                if self.num_arm_joints != 6:
+                    logger.warning("Drake-less fallback uses xArm6 joint indices, unverified here")
                 code, current_angles = self.arm.get_servo_angle(is_radian=True)
                 if code == 0:
                     # Apply rotation to appropriate joint
@@ -1013,7 +1027,7 @@ class FTPullModule(Module):
 
                     # Execute movement
                     code = self.arm.set_servo_angle(
-                        angle=current_angles[:6], speed=15, wait=True, is_radian=True
+                        angle=current_angles[: self.num_arm_joints], speed=15, wait=True, is_radian=True
                     )
                     if code == 0:
                         self.motion_count += 1

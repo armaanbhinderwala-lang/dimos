@@ -183,6 +183,9 @@ Examples:
         "--processes", type=int, default=3, help="Number of Dimos processes (default: 3)"
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument(
+        "--xarm7", action="store_true", help="Use the 7-DOF xArm7 URDF/joint set instead of xArm6"
+    )
 
     args = parser.parse_args()
 
@@ -237,6 +240,8 @@ Examples:
         xarm_ip=args.xarm,
         enable_real_robot=(args.xarm is not None),
         verbose=args.verbose,
+        num_arm_joints=7 if args.xarm7 else 6,
+        urdf_filename="xarm7_openft_gripper.urdf" if args.xarm7 else "xarm6_openft_gripper.urdf",
     )
     logger.info("FT pull module deployment complete")
 
