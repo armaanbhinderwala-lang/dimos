@@ -16,8 +16,9 @@
 """
 Force-Torque Module Test/Deployment Script
 
-Deploys and connects the FT driver and visualizer modules using Dimos.
+Deploys and connects the FT driver, visualizer and logger modules using Dimos.
 Uses LCM transport for Vector3 force and torque messages.
+Force/torque samples are recorded to a SQLite .db file.
 """
 
 import time
@@ -28,6 +29,7 @@ from dimos.core import start, LCMTransport, pLCMTransport
 from dimos.utils.logging_config import setup_logger
 from dimos.msgs.geometry_msgs import Vector3
 from dimos.hardware.ft_driver_module import FTDriverModule, RawSensorData
+from dimos.hardware.ft_logger_module import FTLoggerModule
 from dimos.hardware.ft_visualizer_module import FTVisualizerModule
 
 logger = setup_logger(__name__)
@@ -51,6 +53,12 @@ Examples:
 
   # Run with custom dashboard port
   python ft_module_test.py --dash-port 8080 --calibration ft_calibration.npz
+
+  # Write the recording to a specific database file, including raw sensor values
+  python ft_module_test.py --db ft_logs/run1.db --db-raw
+
+  # Run without recording
+  python ft_module_test.py --no-db
         """,
     )
 
@@ -90,6 +98,24 @@ Examples:
         help="Dashboard update interval in ms (default: 100)",
     )
 
+    # Logger arguments
+    parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="SQLite database file to record to (default: ft_logs/ft_log_<timestamp>.db)",
+    )
+    parser.add_argument("--no-db", action="store_true", help="Disable recording to a database file")
+    parser.add_argument(
+        "--db-raw", action="store_true", help="Also record raw sensor values to the database"
+    )
+    parser.add_argument(
+        "--db-flush-interval",
+        type=float,
+        default=1.0,
+        help="Seconds between database commits (default: 1.0)",
+    )
+
     # LCM transport arguments
     parser.add_argument(
         "--lcm-force-channel",
@@ -118,6 +144,14 @@ Examples:
     parser.add_argument("--no-raw", action="store_true", help="Don't publish raw sensor data")
 
     args = parser.parse_args()
+
+    # Resolve the database path (absolute, so worker processes agree on it)
+    db_path = None
+    if not args.no_db:
+        db_path = Path(
+            args.db or f"ft_logs/ft_log_{time.strftime('%Y%m%d_%H%M%S')}.db"
+        ).expanduser()
+        db_path = db_path if db_path.is_absolute() else Path.cwd() / db_path
 
     # Check if calibration file exists if specified
     if args.calibration:
@@ -166,6 +200,43 @@ Examples:
         driver.raw_sensor_data.transport = pLCMTransport(args.lcm_raw_channel)
         logger.info(f"  Raw sensor data channel: {args.lcm_raw_channel}")
 
+    # Deploy logger module (records to a SQLite .db file)
+    ft_logger = None
+    if db_path:
+        log_raw = args.db_raw and not args.no_raw
+        if args.db_raw and args.no_raw:
+            logger.warning("--db-raw ignored because --no-raw disables raw sensor publishing")
+
+        logger.info("Deploying FT logger module...")
+        logger.info(f"  Database file: {db_path}")
+        logger.info(f"  Flush interval: {args.db_flush_interval}s")
+        logger.info(f"  Logging raw sensor values: {log_raw}")
+
+        ft_logger = dimos.deploy(
+            FTLoggerModule,
+            db_path=str(db_path),
+            flush_interval=args.db_flush_interval,
+            log_raw=log_raw,
+            metadata={
+                "serial_port": args.port,
+                "baud_rate": args.baud,
+                "window_size": args.window,
+                "calibration_file": args.calibration or "none",
+            },
+            verbose=args.verbose,
+        )
+
+        # Connect logger inputs to driver outputs
+        ft_logger.force.connect(driver.force)
+        ft_logger.torque.connect(driver.torque)
+        if log_raw:
+            ft_logger.raw_sensor_data.connect(driver.raw_sensor_data)
+        logger.info("  Connected to driver output streams")
+
+        if not args.calibration:
+            logger.warning("Without calibration the driver publishes no force/torque data")
+            logger.warning("  Use --db-raw to record raw sensor values instead")
+
     # Deploy visualizer if requested
     visualizer = None
     if not args.no_visualizer and args.calibration:
@@ -200,8 +271,30 @@ Examples:
     logger.info("Starting modules...")
     logger.info("=" * 60)
 
+    # Start logger before the driver so no samples are missed
+    if ft_logger:
+        if ft_logger.start():
+            logger.info(f"Recording to {db_path}")
+        else:
+            logger.error(f"Logger failed to start - no data will be recorded to {db_path}")
+            ft_logger = None
+
     # Start driver
-    driver.start()
+    if not driver.start():
+        logger.error("CRITICAL: FT driver failed to start - no data will be published!")
+        logger.error("Check that:")
+        logger.error(f"  1. Serial port {args.port} exists and is accessible")
+        logger.error("  2. No other process is using the serial port")
+        logger.error("  3. You have permission to access the serial port")
+        logger.error("  4. The sensor is connected and powered on")
+        logger.info(f"\nTry running: ls -la {args.port}")
+        logger.info("If it is owned by the 'dialout' group, either start a new login shell")
+        logger.info(f"  after 'sudo usermod -aG dialout $USER', or: sudo chmod 666 {args.port}")
+
+        if ft_logger:
+            ft_logger.stop()
+        dimos.shutdown()
+        return
 
     # Start visualizer
     if visualizer:
@@ -243,6 +336,16 @@ Examples:
                         f"Data points={viz_stats['data_points']}"
                     )
 
+                if ft_logger:
+                    log_stats = ft_logger.get_stats()
+                    logger.info(
+                        f"Logger Stats: Rows written={log_stats['written_count']}, "
+                        f"Pending={log_stats['pending_rows']}, "
+                        f"Force={log_stats['force_count']}, "
+                        f"Torque={log_stats['torque_count']}, "
+                        f"Raw={log_stats['raw_count']}"
+                    )
+
                 last_print_time = time.time()
 
     except KeyboardInterrupt:
@@ -250,10 +353,18 @@ Examples:
         logger.info("Shutting down...")
         logger.info("=" * 60)
 
-        # Stop modules
+        # Stop modules - driver first so the logger can drain the last samples
         driver.stop()
         if visualizer:
             visualizer.stop()
+        if ft_logger:
+            log_stats = ft_logger.get_stats()
+            ft_logger.stop()
+            logger.info(
+                f"Recording saved to {db_path} "
+                f"(force={log_stats['force_count']}, torque={log_stats['torque_count']}, "
+                f"raw={log_stats['raw_count']})"
+            )
 
         # Shutdown Dimos
         time.sleep(0.5)  # Give modules time to clean up
