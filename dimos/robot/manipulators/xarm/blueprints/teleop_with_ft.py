@@ -27,7 +27,7 @@ when that's plugged in -- same ext_wrench/raw_wrench ports, same plotter.
 
 from __future__ import annotations
 
-from dimos.control.coordinator import ControlCoordinator
+from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
@@ -63,12 +63,23 @@ keyboard_teleop_xarm7_ft = autoconnect(
         joint_state_frame_id="coordinator",
         hardware=[_xarm7_hw],
         tasks=[
+            # No gripper params on purpose: they make eef_twist claim the gripper
+            # (claim_with_gripper) and hold it at gripper_open_pos every tick,
+            # which overrides the one-shot `[`/`]` key commands.
             eef_twist_task(
                 _xarm7_hw,
                 robot_model=_xarm7_control_model,
                 timeout=0.0,
-                params=_gripper_params,
-            )
+            ),
+            # `[`/`]` publish a JointState on `joint_command`, which routing only
+            # delivers to `servo` tasks - eef_twist declares no such binding.
+            TaskConfig(
+                name="servo_gripper",
+                type="servo",
+                joint_names=_xarm7_hw.gripper_joints,
+                priority=20,
+                params={"timeout": 0.0, "default_positions": [0.0]},
+            ),
         ],
     ),
     ManipulationModule.blueprint(
