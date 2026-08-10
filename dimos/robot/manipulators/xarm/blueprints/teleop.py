@@ -79,12 +79,24 @@ keyboard_teleop_xarm7 = autoconnect(
         joint_state_frame_id="coordinator",
         hardware=[_xarm7_hw],
         tasks=[
+            # No gripper params here on purpose: they make eef_twist claim the
+            # gripper (claim_with_gripper) and hold it at gripper_open_pos every
+            # tick, which fights the servo task below. Same as piper/a1z keyboard.
             eef_twist_task(
                 _xarm7_hw,
                 robot_model=_xarm7_control_model,
                 timeout=0.0,
-                params=_xarm_gripper_params,
-            )
+            ),
+            # The `[`/`]` keys publish a JointState on `joint_command`, which
+            # routing only delivers to `servo` tasks - eef_twist has no such
+            # binding, so without this task the gripper keys do nothing.
+            TaskConfig(
+                name="servo_gripper",
+                type="servo",
+                joint_names=_xarm7_hw.gripper_joints,
+                priority=20,
+                params={"timeout": 0.0, "default_positions": [0.0]},
+            ),
         ],
     ),
     ManipulationModule.blueprint(
