@@ -132,7 +132,9 @@ class RealsenseModule(Module):
 
                 self.frame_count += 1
             except Exception as e:
-                if self.verbose:
+                # Always surface the first one - a silent error count reads as
+                # "camera alive, no frames" and hides missing transports entirely.
+                if self.verbose or self.error_count == 0:
                     logger.warning(f"Capture error: {e}")
                 self.error_count += 1
         logger.info(f"RealSense capture loop stopped after {self.frame_count} frames")
@@ -198,17 +200,43 @@ class RealsenseModule(Module):
 if __name__ == "__main__":
     import argparse
 
-    from dimos.core import start
+    from dimos.core import LCMTransport, start
 
     parser = argparse.ArgumentParser(description="RealSense Camera Module")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--lcm-color-channel", default="/camera/color_image")
+    parser.add_argument("--lcm-depth-channel", default="/camera/depth_image")
+    parser.add_argument("--lcm-info-channel", default="/camera/camera_info")
     args = parser.parse_args()
 
     dimos = start(1)
     cam = dimos.deploy(
         RealsenseModule, width=args.width, height=args.height, fps=args.fps, verbose=args.verbose
     )
-    cam.start()
+
+    # Without transports every publish raises and the capture loop just counts errors,
+    # so the module looks alive while emitting nothing. Same channels handle_grab_test uses.
+    cam.color_image.transport = LCMTransport(args.lcm_color_channel, Image)
+    cam.depth_image.transport = LCMTransport(args.lcm_depth_channel, Image)
+    cam.camera_info.transport = LCMTransport(args.lcm_info_channel, CameraInfo)
+
+    if not cam.start():
+        dimos.shutdown()
+        raise SystemExit(1)
+
+    logger.info(f"Publishing on {args.lcm_color_channel} / {args.lcm_depth_channel}")
+    logger.info("Press Ctrl+C to stop...")
+
+    # The dask cluster dies with this process, so hold it open until interrupted.
+    try:
+        while True:
+            time.sleep(5)
+            stats = cam.get_stats()
+            logger.info(f"Frames={stats['frame_count']}, Errors={stats['error_count']}")
+    except KeyboardInterrupt:
+        cam.stop()
+        time.sleep(0.5)
+        dimos.shutdown()

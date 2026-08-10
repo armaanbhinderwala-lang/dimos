@@ -33,7 +33,7 @@ import json
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
-from lcm_msgs.sensor_msgs import JointState
+from dimos_lcm.sensor_msgs import JointState
 from pydrake.all import (
     MultibodyPlant,
     Parser,
