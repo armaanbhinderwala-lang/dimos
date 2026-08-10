@@ -16,8 +16,11 @@
 
 Same hardware/control-task setup as keyboard_teleop_xarm6/7 (./teleop.py), with
 XArmFTSensor and WrenchPlotter added into the same autoconnect(). Jog the arm
-and close the gripper on the handle by hand -- no perception, no pull logic
-yet -- while watching live force/torque in the Rerun viewer WrenchPlotter opens.
+and close the gripper on the handle by hand, same as before -- but now
+keyboard_teleop_xarm7_ft also has FTPullModule wired in: press ENTER to hand
+off from manual WASD control to the automatic FT-feedback pull (Step C).
+Don't drive WASD while a pull is active -- both publish to the same twist
+channel, and whichever publishes most recently wins each tick.
 
 Uses the xArm's built-in FT sensor (no serial port, just the arm's own IP) --
 NOT the homemade OpenFT sensor (dimos.hardware.sensors.force_torque.openft_module),
@@ -31,6 +34,7 @@ from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
+from dimos.hardware.sensors.force_torque.ft_pull_module import FTPullModule
 from dimos.hardware.sensors.force_torque.read_FTModule import XArmFTSensor
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
@@ -89,6 +93,7 @@ keyboard_teleop_xarm7_ft = autoconnect(
     # Same physical arm as the hardware above -- reuse its IP rather than the
     # separate DIMOS_XARM_IP env var XArmFTSensorConfig defaults to.
     XArmFTSensor.blueprint(ip=global_config.xarm7_ip),
+    FTPullModule.blueprint(hardware_id="arm", num_arm_joints=7, auto_run=False),
     WrenchPlotter.blueprint(),
 ).transports(_ft_transports)
 

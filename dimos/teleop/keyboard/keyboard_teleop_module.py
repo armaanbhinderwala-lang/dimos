@@ -26,6 +26,7 @@ Keyboard controls:
     Y/H: +Yaw/-Yaw
     [: Open gripper
     ]: Close gripper
+    ENTER: Start FT pull (if an FTPullModule is connected; no-op otherwise)
     ESC: Quit
 """
 
@@ -49,6 +50,7 @@ from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.sensor_msgs.JointState import JointState
+from dimos.msgs.std_msgs.Bool import Bool
 from dimos.robot.manipulators.common.topics import EEF_TWIST_TASK_NAME
 from dimos.utils.logging_config import setup_logger
 
@@ -114,6 +116,8 @@ class KeyboardTeleopModule(Module):
 
     coordinator_ee_twist_command: Out[TwistStamped]
     joint_command: Out[JointState]
+    # Unused unless something (FTPullModule) is connected to it -- harmless no-op otherwise.
+    start_pull_command: Out[Bool]
 
     _stop_event: threading.Event
     _thread: threading.Thread | None = None
@@ -201,6 +205,7 @@ class KeyboardTeleopModule(Module):
                 ("T/G", "+Pitch/-Pitch"),
                 ("Y/H", "+Yaw/-Yaw"),
                 ("[/]", "Open/close gripper"),
+                ("ENTER", "Start FT pull"),
                 ("ESC", "Quit"),
             ]
             for key, desc in controls:
@@ -234,6 +239,8 @@ class KeyboardTeleopModule(Module):
                 self._set_gripper_position(self.config.gripper_open_position)
             elif event.key == right_bracket:
                 self._set_gripper_position(GRIPPER_CLOSED_POSITION)
+            elif event.key == pygame.K_RETURN:
+                self.start_pull_command.publish(Bool(data=True))
         elif event.type == pygame.KEYUP and event.key in _motion_key_codes():
             held_motion_keys.discard(event.key)
             linear, angular = _twist_from_keys(
