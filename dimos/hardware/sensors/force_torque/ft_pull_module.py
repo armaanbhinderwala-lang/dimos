@@ -115,6 +115,11 @@ class FTPullModule(Module):
     _running: bool = False
     _stop_requested: bool = False
 
+    # Same tracking fields as the original continuous_pull skill's get_stats().
+    total_rotation: float = 0.0
+    total_pull_distance: float = 0.0
+    motion_count: int = 0
+
     @rpc
     def start(self) -> None:
         super().start()
@@ -280,9 +285,11 @@ class FTPullModule(Module):
 
         self._running = True
         self._stop_requested = False
+        self.total_rotation = 0.0
+        self.total_pull_distance = 0.0
+        self.motion_count = 0
         dt = 1.0 / self.config.control_rate_hz
         rotation_history: deque = deque(maxlen=5)
-        total_rotation = 0.0
         end_angle_rad = np.radians(self.config.end_angle_deg) if self.config.end_angle_deg else None
         start_time = time.time()
         ticks = 0
@@ -299,7 +306,7 @@ class FTPullModule(Module):
             if time.time() - start_time > self.config.max_duration:
                 logger.info("Reached max_duration (%.1fs)", self.config.max_duration)
                 break
-            if end_angle_rad and abs(total_rotation) >= end_angle_rad:
+            if end_angle_rad and abs(self.total_rotation) >= end_angle_rad:
                 logger.info("Reached end_angle (%.1f deg)", self.config.end_angle_deg)
                 break
 
@@ -312,7 +319,7 @@ class FTPullModule(Module):
             rotation_angle, pull_distance = self._compute_rotation_and_pull(
                 force, rotation_history, self.config.oscillation_damping
             )
-            total_rotation += rotation_angle
+            self.total_rotation += rotation_angle
 
             pose = self._ik.forward_kinematics(q)  # type: ignore[union-attr]
             if ticks < 3:
@@ -324,16 +331,19 @@ class FTPullModule(Module):
             self.coordinator_ee_twist_command.publish(
                 TwistStamped(frame_id="ft_pull", linear=list(linear), angular=list(angular))
             )
+            self.total_pull_distance += float(np.linalg.norm(linear) * dt)
+            self.motion_count += 1
 
             ticks += 1
             if ticks % 25 == 0:
                 logger.info(
-                    "[tick %d] Fx=%.1fN lateral=%.1fN rot=%.2fdeg total=%.1fdeg",
+                    "[tick %d] Fx=%.1fN lateral=%.1fN rot=%.2fdeg total=%.1fdeg pull=%.1fcm",
                     ticks,
                     force[0],
                     float(np.linalg.norm(force[:2])),
                     np.degrees(rotation_angle),
-                    np.degrees(total_rotation),
+                    np.degrees(self.total_rotation),
+                    self.total_pull_distance * 100,
                 )
 
             await asyncio.sleep(dt)
@@ -343,7 +353,12 @@ class FTPullModule(Module):
             TwistStamped(frame_id="ft_pull", linear=[0, 0, 0], angular=[0, 0, 0])
         )
         self._running = False
-        logger.info("Pull finished: %d ticks, %.1f deg total rotation", ticks, np.degrees(total_rotation))
+        logger.info(
+            "Pull finished: %d steps, %.1f deg, %.1f cm",
+            self.motion_count,
+            np.degrees(self.total_rotation),
+            self.total_pull_distance * 100,
+        )
 
     @rpc
     def stop_pull(self) -> str:
@@ -352,7 +367,14 @@ class FTPullModule(Module):
 
     @rpc
     def get_stats(self) -> dict[str, Any]:
+        """Same fields as the original continuous_pull skill's get_stats()."""
         with self._lock:
-            has_force = self._latest_force is not None
-            has_q = self._latest_q is not None
-        return {"running": self._running, "has_force": has_force, "has_joint_state": has_q}
+            force = self._latest_force.copy() if self._latest_force is not None else None
+        return {
+            "has_force_data": force is not None,
+            "lateral_force": float(np.linalg.norm(force[:2])) if force is not None else 0.0,
+            "total_rotation_deg": float(np.degrees(self.total_rotation)),
+            "total_pull_cm": self.total_pull_distance * 100,
+            "motion_count": self.motion_count,
+            "running": self._running,
+        }
