@@ -31,10 +31,13 @@ original math is also entirely world-frame, so no frame conversion was needed --
 just the pivot-rotation math re-expressed as an instantaneous twist (see
 _pivot_rotation_to_twist below for the derivation).
 
-NOT yet hardware-verified: `ee_joint_id` (which Pinocchio joint index is the
-tool frame) and that PinocchioIK.forward_kinematics on this URDF returns a
-sane pose. Print the computed EE position on the first few ticks and sanity
-check it against a known pose before trusting the pull motion.
+Model/FK: uses the SAME model_path/package_paths/xacro_args/tool_frame_name
+as whatever RobotModelConfig the coordinator's own IK backend was built with
+for this arm (e.g. make_xarm7_model_config()) -- passed in by the blueprint,
+not a separate file -- so this module's forward kinematics can't drift from
+what Pink IK is actually solving against. Still worth a first-run sanity
+check: the logged EE position on the first few ticks should be a real,
+sane pose, not NaN/zero/garbage.
 """
 
 from __future__ import annotations
@@ -47,11 +50,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+import pinocchio
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
-from dimos.manipulation.planning.kinematics.pinocchio_ik import PinocchioIK
+from dimos.manipulation.planning.utils.mesh_utils import prepare_urdf_for_drake
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -72,8 +76,17 @@ class FTPullConfig(ModuleConfig):
 
     hardware_id: str = "arm"
     num_arm_joints: int = 7
-    urdf_path: str | Path = "dimos/hardware/xarm7_openft_gripper.urdf"
-    ee_joint_id: int = 7  # UNVERIFIED -- last arm joint before the tool, check on first run
+    # Same model the coordinator's own IK backend uses for this arm -- pass
+    # these straight from the RobotModelConfig already built for it (e.g.
+    # make_xarm7_model_config()'s .model_path/.package_paths/.xacro_args), not
+    # a separate file, so this module's FK can never drift from what Pink IK
+    # is actually solving against.
+    model_path: Path
+    package_paths: dict[str, Path] = {}
+    xacro_args: dict[str, str] = {}
+    # "link_tcp" if the model was built with add_gripper=True, else f"link{num_arm_joints}"
+    # -- matches dimos/robot/manipulators/xarm/config.py's tip_link logic.
+    tool_frame_name: str
 
     pivot_distance: float = 0.2
     force_threshold: float = 7.0
@@ -111,7 +124,9 @@ class FTPullModule(Module):
     _lock: threading.Lock
     _latest_force: np.ndarray | None = None
     _latest_q: np.ndarray | None = None
-    _ik: PinocchioIK | None = None
+    _pin_model: Any = None
+    _pin_data: Any = None
+    _frame_id: int = -1
     _running: bool = False
     _stop_requested: bool = False
 
@@ -124,13 +139,41 @@ class FTPullModule(Module):
     def start(self) -> None:
         super().start()
         self._lock = threading.Lock()
-        self._ik = PinocchioIK.from_model_path(str(self.config.urdf_path), self.config.ee_joint_id)
+
+        # Same load path pink_ik.py uses: resolve xacro + package:// URIs to a
+        # plain URDF (cached), then a bare pinocchio model -- no Pink-specific
+        # machinery needed just for forward kinematics.
+        model_path = Path(self.config.model_path).resolve()
+        if not model_path.exists():
+            raise FileNotFoundError(f"FTPullModule: robot model not found: {model_path}")
+        if model_path.suffix == ".xml":
+            self._pin_model = pinocchio.buildModelFromMJCF(str(model_path))
+        else:
+            prepared_path = prepare_urdf_for_drake(
+                urdf_path=model_path,
+                package_paths=self.config.package_paths,
+                xacro_args=self.config.xacro_args,
+            )
+            self._pin_model = pinocchio.buildModelFromUrdf(str(prepared_path))
+        self._pin_data = self._pin_model.createData()
+        if not self._pin_model.existFrame(self.config.tool_frame_name):
+            raise ValueError(
+                f"FTPullModule: no frame '{self.config.tool_frame_name}' in {model_path} -- "
+                f"check tool_frame_name matches the model's actual tip link name."
+            )
+        self._frame_id = int(self._pin_model.getFrameId(self.config.tool_frame_name))
+
         self.ext_wrench.subscribe(self._on_wrench)
         self.coordinator_joint_state.subscribe(self._on_joint_state)
         self.start_pull_command.subscribe(self._on_start_pull_command)
-        logger.info("FTPullModule ready (ee_joint_id=%d, VERIFY this on first run)", self.config.ee_joint_id)
+        logger.info("FTPullModule ready (tool_frame=%s)", self.config.tool_frame_name)
         if self.config.auto_run:
             self.spawn(self._pull_loop())
+
+    def _forward_kinematics(self, q: np.ndarray) -> pinocchio.SE3:
+        pinocchio.forwardKinematics(self._pin_model, self._pin_data, q)
+        pinocchio.updateFramePlacements(self._pin_model, self._pin_data)
+        return self._pin_data.oMf[self._frame_id]
 
     def _on_start_pull_command(self, msg: Bool) -> None:
         if not msg.data:
@@ -321,7 +364,7 @@ class FTPullModule(Module):
             )
             self.total_rotation += rotation_angle
 
-            pose = self._ik.forward_kinematics(q)  # type: ignore[union-attr]
+            pose = self._forward_kinematics(q)
             if ticks < 3:
                 logger.info("EE pose tick %d: translation=%s -- sanity check this", ticks, pose.translation)
 

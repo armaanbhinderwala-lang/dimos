@@ -93,7 +93,18 @@ keyboard_teleop_xarm7_ft = autoconnect(
     # Same physical arm as the hardware above -- reuse its IP rather than the
     # separate DIMOS_XARM_IP env var XArmFTSensorConfig defaults to.
     XArmFTSensor.blueprint(ip=global_config.xarm7_ip),
-    FTPullModule.blueprint(hardware_id="arm", num_arm_joints=7, auto_run=False),
+    # Same model config eef_twist_task above was built with -- add_gripper=False
+    # there means its tip frame is "link7" (see xarm/config.py's tip_link logic),
+    # not "link_tcp".
+    FTPullModule.blueprint(
+        hardware_id="arm",
+        num_arm_joints=7,
+        model_path=_xarm7_control_model.model_path,
+        package_paths=_xarm7_control_model.package_paths,
+        xacro_args=_xarm7_control_model.xacro_args,
+        tool_frame_name="link7",
+        auto_run=False,
+    ),
     WrenchPlotter.blueprint(),
 ).transports(_ft_transports)
 
