@@ -169,6 +169,17 @@ class FTPullModule(Module):
             )
         self._frame_id = int(self._pin_model.getFrameId(self.config.tool_frame_name))
 
+        # Twist-domain stand-in for the original's q_new = np.clip(q_new, q_lower,
+        # q_upper): CartesianIKTask/EEFTwistTask enforce no joint limits at all
+        # (confirmed -- make_xarm7_model_config never sets joint_limits_lower/upper,
+        # and cartesian_ik_task.py never clips), so without this the arm's own
+        # firmware is the only thing that stops an out-of-range command, and it
+        # does so by faulting, not gracefully. This model is gripperless
+        # (add_gripper=False), so its q is exactly the num_arm_joints arm joints,
+        # same order as coordinator_joint_state -- no remapping needed.
+        self._q_lower = np.array(self._pin_model.lowerPositionLimit)
+        self._q_upper = np.array(self._pin_model.upperPositionLimit)
+
         self.ext_wrench.subscribe(self._on_wrench)
         self.coordinator_joint_state.subscribe(self._on_joint_state)
         self.start_pull_command.subscribe(self._on_start_pull_command)
@@ -180,6 +191,13 @@ class FTPullModule(Module):
         pinocchio.forwardKinematics(self._pin_model, self._pin_data, q)
         pinocchio.updateFramePlacements(self._pin_model, self._pin_data)
         return self._pin_data.oMf[self._frame_id]
+
+    def _near_joint_limit(self, q: np.ndarray, margin_rad: float = 0.1) -> int | None:
+        """Index of the first joint within margin_rad of its limit, or None if all clear."""
+        too_low = q <= self._q_lower + margin_rad
+        too_high = q >= self._q_upper - margin_rad
+        hits = np.where(too_low | too_high)[0]
+        return int(hits[0]) if len(hits) else None
 
     def _on_start_pull_command(self, msg: Bool) -> None:
         if not msg.data:
@@ -364,6 +382,16 @@ class FTPullModule(Module):
                 await asyncio.sleep(dt)
                 continue
             force, q = state
+
+            near_limit = self._near_joint_limit(q)
+            if near_limit is not None:
+                logger.warning(
+                    "Joint %d at %.3f rad is within the safety margin of its limit -- "
+                    "stopping pull before the arm's firmware has to reject a command.",
+                    near_limit,
+                    q[near_limit],
+                )
+                break
 
             rotation_angle, pull_distance = self._compute_rotation_and_pull(
                 force, rotation_history, self.config.oscillation_damping
