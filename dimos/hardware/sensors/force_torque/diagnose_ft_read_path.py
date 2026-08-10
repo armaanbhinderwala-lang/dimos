@@ -44,8 +44,17 @@ def main():
 
     code = arm.set_ft_sensor_enable(1)
     print(f"set_ft_sensor_enable(1) -> code={code}")
+    # A separate, FT-specific error code -- distinct from arm.error_code -- for
+    # exactly the "call reports success but something's actually wrong" case
+    # we're chasing here.
+    if hasattr(arm, "get_ft_sensor_error"):
+        print(f"get_ft_sensor_error() -> {arm.get_ft_sensor_error()}")
+    else:
+        print("get_ft_sensor_error() not available on this SDK version")
     mode_code = arm.set_ft_sensor_mode(0)
     print(f"set_ft_sensor_mode(0) -> code={mode_code}")
+    if hasattr(arm, "get_ft_sensor_config"):
+        print(f"get_ft_sensor_config() -> {arm.get_ft_sensor_config()}")
 
     print("\nPress the arm/sensor by hand while this runs to see if anything moves.\n")
     print(f"{'t':>5}  {'get_ft_sensor_data()':>45}  {'ft_ext_force (cached)':>35}  {'ft_raw_force (cached)':>35}")
