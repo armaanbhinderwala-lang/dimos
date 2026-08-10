@@ -31,7 +31,16 @@ def main():
         print("Active error/warning present -- clearing before touching the FT sensor.")
         arm.clean_error()
         arm.clean_warn()
-        print(f"after clean: error_code={arm.error_code}  warn_code={arm.warn_code}  state={arm.state}")
+
+    # state=4 means the arm was never brought to "ready" -- this enables the
+    # motor drivers and sets ready state, it does NOT command any motion by
+    # itself (no move/servo call here), so this is safe with the arm as-is.
+    if arm.state != 0:
+        print(f"state={arm.state}, not ready -- enabling motion and setting state 0")
+        arm.motion_enable(enable=True)
+        arm.set_mode(0)
+        arm.set_state(0)
+        print(f"after enable: error_code={arm.error_code}  warn_code={arm.warn_code}  state={arm.state}")
 
     code = arm.set_ft_sensor_enable(1)
     print(f"set_ft_sensor_enable(1) -> code={code}")
