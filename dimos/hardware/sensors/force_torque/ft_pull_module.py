@@ -60,6 +60,7 @@ from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.std_msgs.Bool import Bool
+from dimos.robot.manipulators.common.topics import EEF_TWIST_TASK_NAME
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -87,6 +88,11 @@ class FTPullConfig(ModuleConfig):
     # "link_tcp" if the model was built with add_gripper=True, else f"link{num_arm_joints}"
     # -- matches dimos/robot/manipulators/xarm/config.py's tip_link logic.
     tool_frame_name: str
+    # Routing key for coordinator_ee_twist_command -- the coordinator reads
+    # TwistStamped.frame_id as the TARGET TASK NAME, not a label. Must match
+    # whatever eef_twist_task() registered this arm's twist task as, same
+    # constant KeyboardTeleopConfig.task_name defaults to.
+    task_name: str = EEF_TWIST_TASK_NAME
 
     pivot_distance: float = 0.2
     force_threshold: float = 7.0
@@ -372,7 +378,7 @@ class FTPullModule(Module):
                 np.asarray(pose.translation), np.asarray(pose.rotation), rotation_angle, pull_distance, dt
             )
             self.coordinator_ee_twist_command.publish(
-                TwistStamped(frame_id="ft_pull", linear=list(linear), angular=list(angular))
+                TwistStamped(frame_id=self.config.task_name, linear=list(linear), angular=list(angular))
             )
             self.total_pull_distance += float(np.linalg.norm(linear) * dt)
             self.motion_count += 1
@@ -393,7 +399,7 @@ class FTPullModule(Module):
 
         # Zero twist clears EEFTwistTask's latched command (see on_ee_twist_command).
         self.coordinator_ee_twist_command.publish(
-            TwistStamped(frame_id="ft_pull", linear=[0, 0, 0], angular=[0, 0, 0])
+            TwistStamped(frame_id=self.config.task_name, linear=[0, 0, 0], angular=[0, 0, 0])
         )
         self._running = False
         logger.info(
