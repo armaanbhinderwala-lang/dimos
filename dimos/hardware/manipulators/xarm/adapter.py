@@ -42,7 +42,7 @@ _XARM_LIFECYCLE_SPEED_DEG = 20.0
 _XARM_LIFECYCLE_ACCEL_DEG = 500.0
 _XARM6_INITIAL_JOINTS_DEG = [0.0, -40.0, -50.0, 0.0, 90.0, 0.0]
 # TODO (CC): change this once we have 7dof arm setup
-_XARM7_INITIAL_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0, 0.0, math.degrees(-0.7), 0.0]
+_XARM7_INITIAL_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0, 0.0, -90.0, 0.0]
 
 # XArm mode codes
 _XARM_MODE_POSITION = 0
