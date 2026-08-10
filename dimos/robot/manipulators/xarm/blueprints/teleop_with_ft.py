@@ -12,25 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keyboard teleop for xArm6/xArm7, with the homemade OpenFT sensor graphed live.
+"""Keyboard teleop for xArm6/xArm7, with the arm's own built-in FT sensor graphed live.
 
-Same hardware/control-task setup as keyboard_teleop_xarm6/7
-(dimos.robot.manipulators.xarm.blueprints.teleop), with OpenFTSensor and
-WrenchPlotter added into the same autoconnect(). Jog the arm and close the
-gripper on the handle by hand -- no perception, no pull logic yet -- while
-watching live force/torque in the Rerun viewer WrenchPlotter opens.
+Same hardware/control-task setup as keyboard_teleop_xarm6/7 (./teleop.py), with
+XArmFTSensor and WrenchPlotter added into the same autoconnect(). Jog the arm
+and close the gripper on the handle by hand -- no perception, no pull logic
+yet -- while watching live force/torque in the Rerun viewer WrenchPlotter opens.
 
-To use the xArm's own built-in FT sensor instead of the homemade one, swap
-OpenFTSensor for XArmFTSensor (dimos.hardware.sensors.force_torque.read_FTModule)
--- same ext_wrench/raw_wrench ports, same plotter, no other change needed.
+Uses the xArm's built-in FT sensor (no serial port, just the arm's own IP) --
+NOT the homemade OpenFT sensor (dimos.hardware.sensors.force_torque.openft_module),
+which needs its MCU wired up over serial. Swap XArmFTSensor for OpenFTSensor
+when that's plugged in -- same ext_wrench/raw_wrench ports, same plotter.
 """
 
 from __future__ import annotations
 
 from dimos.control.coordinator import ControlCoordinator
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
-from dimos.hardware.sensors.force_torque.openft_module import OpenFTSensor
+from dimos.hardware.sensors.force_torque.read_FTModule import XArmFTSensor
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
 from dimos.robot.manipulators.common.blueprints import GripperTaskOverrides, eef_twist_task
@@ -74,7 +75,9 @@ keyboard_teleop_xarm7_ft = autoconnect(
         robots=[make_xarm7_model_config(add_gripper=True)],
         visualization={"backend": "viser"},
     ),
-    OpenFTSensor.blueprint(),
+    # Same physical arm as the hardware above -- reuse its IP rather than the
+    # separate DIMOS_XARM_IP env var XArmFTSensorConfig defaults to.
+    XArmFTSensor.blueprint(ip=global_config.xarm7_ip),
     WrenchPlotter.blueprint(),
 ).transports(_ft_transports)
 
@@ -101,6 +104,6 @@ keyboard_teleop_xarm6_ft = autoconnect(
         robots=[make_xarm6_model_config(add_gripper=True)],
         visualization={"backend": "viser"},
     ),
-    OpenFTSensor.blueprint(),
+    XArmFTSensor.blueprint(ip=global_config.xarm6_ip),
     WrenchPlotter.blueprint(),
 ).transports(_ft_transports)
