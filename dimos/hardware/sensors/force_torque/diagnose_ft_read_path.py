@@ -26,8 +26,17 @@ def main():
         print(f"FAIL: could not connect to {sys.argv[1]}")
         return 1
 
+    print(f"error_code={arm.error_code}  warn_code={arm.warn_code}  state={arm.state}")
+    if arm.error_code != 0 or arm.warn_code != 0:
+        print("Active error/warning present -- clearing before touching the FT sensor.")
+        arm.clean_error()
+        arm.clean_warn()
+        print(f"after clean: error_code={arm.error_code}  warn_code={arm.warn_code}  state={arm.state}")
+
     code = arm.set_ft_sensor_enable(1)
     print(f"set_ft_sensor_enable(1) -> code={code}")
+    mode_code = arm.set_ft_sensor_mode(0)
+    print(f"set_ft_sensor_mode(0) -> code={mode_code}")
 
     print("\nPress the arm/sensor by hand while this runs to see if anything moves.\n")
     print(f"{'t':>5}  {'get_ft_sensor_data()':>45}  {'ft_ext_force (cached)':>35}  {'ft_raw_force (cached)':>35}")
