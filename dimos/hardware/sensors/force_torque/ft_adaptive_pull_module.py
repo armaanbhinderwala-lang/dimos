@@ -51,6 +51,8 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.hardware.sensors.force_torque.admittance_pull_law import (
+    SENSOR_FORCE_OVERLOAD_N,
+    SENSOR_TORQUE_OVERLOAD_NM,
     AdmittanceConfig,
     compute_twist,
     singularity_speed_scale,
@@ -380,8 +382,17 @@ class FTAdaptivePullModule(Module):
         probe = await self._run_phase("probe", probe_cfg, self.config.probe_distance_m, self.config.probe_max_duration)
 
         if self._running and not self._stop_requested and not probe.safety_tripped:
-            force_cutoff = max(probe.peak_resistance_force * self.config.cutoff_safety_margin, self.config.min_force_cutoff)
-            torque_cutoff = max(probe.peak_torque * self.config.cutoff_safety_margin, self.config.min_torque_cutoff)
+            # Clamped below the sensor's own hardware overload rating (see admittance_pull_law.py)
+            # -- a calibrated cutoff above that can never actually protect anything, the hardware
+            # faults first regardless of what our software thinks is safe.
+            force_cutoff = min(
+                max(probe.peak_resistance_force * self.config.cutoff_safety_margin, self.config.min_force_cutoff),
+                SENSOR_FORCE_OVERLOAD_N * 0.8,
+            )
+            torque_cutoff = min(
+                max(probe.peak_torque * self.config.cutoff_safety_margin, self.config.min_torque_cutoff),
+                SENSOR_TORQUE_OVERLOAD_NM * 0.8,
+            )
             logger.info(
                 "Probe measured peak_force=%.1fN peak_torque=%.1fNm -- executing with cutoffs force<=%.1fN torque<=%.1fNm",
                 probe.peak_resistance_force, probe.peak_torque, force_cutoff, torque_cutoff,

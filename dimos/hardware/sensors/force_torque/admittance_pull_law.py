@@ -46,6 +46,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+# UFACTORY 6-axis FT sensor datasheet: rated 150N (Fx/Fy) / 200N (Fz), 4N*m (any torque axis);
+# overload trips at 150% of rated. torque_cutoff/force_cutoff below must stay under these --
+# error 53 ("sensor overloaded or reading exceeds limit") is the sensor's OWN hardware trip,
+# faster and stricter than anything our software checks once per tick. A software cutoff set
+# above these numbers can never actually protect anything -- the hardware faults first, always.
+SENSOR_FORCE_OVERLOAD_N = 225.0  # 150N rated x 1.5, the smaller (more conservative) of Fx/Fy/Fz
+SENSOR_TORQUE_OVERLOAD_NM = 6.0  # 4N*m rated x 1.5, same on all three torque axes
+
 
 @dataclass
 class AdmittanceConfig:
@@ -54,8 +62,8 @@ class AdmittanceConfig:
     k_rot: float = 0.05  # (rad/s)/(N*m), rotational compliance gain -- UNVERIFIED, retune after first real pull
     max_lateral_speed: float = 0.06  # m/s cap on the compliant (non-drive) linear velocity
     max_rotation_rate: float = 0.35  # rad/s cap (~20 deg/s)
-    force_cutoff: float = 80.0  # N, total force magnitude -- hard stop, same number as the old lateral-only cutoff
-    torque_cutoff: float = 15.0  # N*m -- UNVERIFIED placeholder, no prior data point for this axis, tune down after first test
+    force_cutoff: float = 80.0  # N, total force magnitude -- comfortably under SENSOR_FORCE_OVERLOAD_N
+    torque_cutoff: float = 4.5  # N*m -- was 15.0, ABOVE the sensor's real ~6N*m overload rating; grounded in the datasheet now
     # (resistance_force upper bound N, speed multiplier) -- max capped at 1.0, unlike Yashas's original
     # 1.5x-when-free band: under admittance a stuck door doesn't need extra commanded
     # speed to break free (steady moderate velocity still builds real reaction force
