@@ -18,21 +18,26 @@ Standalone, no dimos Module/framework dependency -- this branch (off main) has
 no FT sensor code at all, and this tool is meant to run during a hands-on
 session, not as a deployed blueprint. Records BOTH sensors simultaneously
 (uFactory's built-in FT sensor is assumed physically upstream of the homemade
-sensor + grip/weight holder, per the "post payload identification" setup):
+sensor + grip/weight holder, per the "post payload identification" setup)
+into 4 SEPARATE tables/files, never mixed together, so raw vs. calibrated and
+sensor vs. sensor are never ambiguous:
 
-  - uFactory: raw (arm.ft_raw_force) and compensated (arm.ft_ext_force).
-  - Homemade: raw 16 channels and a live calibrated preview (matrix @ channels
-    + bias, same math as openft_module.py, reimplemented here since that
-    module isn't part of this branch -- kept intentionally tiny so it can't
-    drift from the real driver's math).
+  - ufactory_raw / ufactory_calibrated (arm.ft_raw_force / arm.ft_ext_force).
+  - homemade_raw (16 channels) / homemade_calibrated (matrix @ channels + bias,
+    same math as openft_module.py, reimplemented here since that module isn't
+    part of this branch -- kept intentionally tiny so it can't drift).
 
-Two 6-bar banks, same scale for both (uFactory's own RATED range -- not
-overload -- 150N Fx/Fy, 200N Fz, 4N*m any torque axis, same datasheet numbers
-used for the door-pull cutoffs): uFactory's compensated reading on top (the
-trustworthy, factory-calibrated one -- this is what "stop at 90%%" means), and
-the homemade sensor's live calibrated preview below it on the identical scale,
-so you can watch how well the homemade calibration is tracking a trusted
-reference while you collect.
+export_csv() (run automatically at the end of a session, or anytime after via
+--export-only) dumps each of those 4 tables to its own CSV, plus experiments.csv
+and run_metadata.csv (arm IP, serial port, calibration file, session type --
+provenance for exactly what config produced this data) -- 6 files total,
+label/session/experiment-start-time already joined into every sensor row.
+
+Live display: uFactory raw and calibrated as two 6-bar banks (uFactory's own
+RATED range -- not overload -- 150N Fx/Fy, 200N Fz, 4N*m any torque axis, same
+datasheet numbers used for the door-pull cutoffs; this is what "stop at 90%%"
+means), then homemade calibrated as a third bank on the same scale, then
+homemade's 16 raw channels as plain numbers with no assumed scale.
 
 Labeling keys mirror KeyboardTeleopModule's jog layout exactly (push = the
 translation keys, twist = the rotation keys) -- same layout, no new scheme to
@@ -40,16 +45,18 @@ learn:
     W/S : push +X / -X      R/F : twist +X (roll)  / -X
     A/D : push +Y / -Y      T/G : twist +Y (pitch) / -Y
     Q/E : push +Z / -Z      Y/H : twist +Z (yaw)   / -Z
-    C   : combined push+twist (freeform, whatever you're doing)
-    SPACE : resting / let go
-    N   : mark a new pose (increments the pose counter, logged per-sample)
-    1/2 : mark session type fast / slow
+    SPACE or ENTER : done with this action, back to resting
     ESC : quit
+
+session type (fast/slow) is a --session-type flag, set once per run -- like a
+new pose, a new session type is just a new run of this script, not an
+in-app toggle.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sqlite3
 import threading
@@ -78,7 +85,7 @@ LABEL_KEYS = {
     "r": "twist +X", "f": "twist -X",
     "t": "twist +Y", "g": "twist -Y",
     "y": "twist +Z", "h": "twist -Z",
-    "c": "combined", "space": "resting",
+    "space": "resting",
 }
 
 # Shown on screen for whichever label is currently active. Exact physical +/- direction
@@ -97,7 +104,6 @@ LABEL_INSTRUCTIONS = {
     "twist -Y": "Twist the grip the other way about Y. Watch the My bar.",
     "twist +Z": "Twist the grip about Z (yaw). Watch the Mz bar.",
     "twist -Z": "Twist the grip the other way about Z. Watch the Mz bar.",
-    "combined": "Push and twist at the same time, on purpose.",
     "resting": "Let go completely. Ignore the first second after releasing.",
 }
 
@@ -124,40 +130,60 @@ def load_calibration(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 class ExperimentLog:
     """One sqlite3 connection per writer thread -- each reader logs its own samples
-    independently, at its own natural rate, tagged with whatever experiment is current."""
+    independently, at its own natural rate, tagged with whatever experiment is current.
 
-    def __init__(self, db_path: Path):
+    session_type is fixed for the whole run (fast/slow -- see --session-type), not an
+    in-app toggle: same reasoning as a new pose being a new run, not an in-app marker."""
+
+    def __init__(self, db_path: Path, session_type: str = "fast"):
         self.db_path = db_path
         self._state_lock = threading.Lock()
         self._experiment_id = 0
         self._label = "resting"
-        self._session_type = "fast"
-        self._pose_index = 0
+        self._session_type = session_type
 
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS run_metadata (key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE IF NOT EXISTS experiments (
                 id INTEGER PRIMARY KEY, label TEXT, session_type TEXT,
-                pose_index INTEGER, start_ts REAL, end_ts REAL
+                start_ts REAL, end_ts REAL
             );
-            CREATE TABLE IF NOT EXISTS ufactory_samples (
+            CREATE TABLE IF NOT EXISTS ufactory_raw (
                 ts REAL, experiment_id INTEGER,
-                raw_fx REAL, raw_fy REAL, raw_fz REAL, raw_mx REAL, raw_my REAL, raw_mz REAL,
-                ext_fx REAL, ext_fy REAL, ext_fz REAL, ext_mx REAL, ext_my REAL, ext_mz REAL
+                fx REAL, fy REAL, fz REAL, mx REAL, my REAL, mz REAL
             );
-            CREATE TABLE IF NOT EXISTS homemade_samples (
+            CREATE TABLE IF NOT EXISTS ufactory_calibrated (
+                ts REAL, experiment_id INTEGER,
+                fx REAL, fy REAL, fz REAL, mx REAL, my REAL, mz REAL
+            );
+            CREATE TABLE IF NOT EXISTS homemade_raw (
                 ts REAL, experiment_id INTEGER,
                 ch1 REAL, ch2 REAL, ch3 REAL, ch4 REAL, ch5 REAL, ch6 REAL, ch7 REAL, ch8 REAL,
-                ch9 REAL, ch10 REAL, ch11 REAL, ch12 REAL, ch13 REAL, ch14 REAL, ch15 REAL, ch16 REAL,
-                cal_fx REAL, cal_fy REAL, cal_fz REAL, cal_mx REAL, cal_my REAL, cal_mz REAL
+                ch9 REAL, ch10 REAL, ch11 REAL, ch12 REAL, ch13 REAL, ch14 REAL, ch15 REAL, ch16 REAL
+            );
+            CREATE TABLE IF NOT EXISTS homemade_calibrated (
+                ts REAL, experiment_id INTEGER,
+                fx REAL, fy REAL, fz REAL, mx REAL, my REAL, mz REAL
             );
             """
         )
         conn.commit()
         conn.close()
         self._start_experiment("resting")
+
+    def set_metadata(self, **fields: object) -> None:
+        """Provenance for this session -- what config actually produced this data.
+        Free-form key/value, not a fixed schema, so it's cheap to add more later."""
+        conn = sqlite3.connect(self.db_path)
+        conn.executemany(
+            "INSERT OR REPLACE INTO run_metadata (key, value) VALUES (?,?)",
+            [(k, str(v)) for k, v in fields.items()],
+        )
+        conn.commit()
+        conn.close()
 
     def _start_experiment(self, label: str) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -166,8 +192,8 @@ class ExperimentLog:
             if self._experiment_id:
                 conn.execute("UPDATE experiments SET end_ts=? WHERE id=?", (now, self._experiment_id))
             cur = conn.execute(
-                "INSERT INTO experiments (label, session_type, pose_index, start_ts) VALUES (?,?,?,?)",
-                (label, self._session_type, self._pose_index, now),
+                "INSERT INTO experiments (label, session_type, start_ts) VALUES (?,?,?)",
+                (label, self._session_type, now),
             )
             self._experiment_id = cur.lastrowid
             self._label = label
@@ -177,16 +203,6 @@ class ExperimentLog:
     def set_label(self, label: str) -> None:
         self._start_experiment(label)
 
-    def new_pose(self) -> None:
-        with self._state_lock:
-            self._pose_index += 1
-        self._start_experiment(self._label)  # re-open a segment so pose_index is current
-
-    def set_session_type(self, session_type: str) -> None:
-        with self._state_lock:
-            self._session_type = session_type
-        self._start_experiment(self._label)
-
     def close(self) -> None:
         conn = sqlite3.connect(self.db_path)
         with self._state_lock:
@@ -195,9 +211,9 @@ class ExperimentLog:
         conn.close()
 
     @property
-    def status(self) -> tuple[str, str, int]:
+    def status(self) -> tuple[str, str]:
         with self._state_lock:
-            return self._label, self._session_type, self._pose_index
+            return self._label, self._session_type
 
     def writer(self) -> "_LogWriter":
         return _LogWriter(self)
@@ -213,18 +229,25 @@ class _LogWriter:
     def log_ufactory(self, raw: np.ndarray, ext: np.ndarray) -> None:
         with self._log._state_lock:
             experiment_id = self._log._experiment_id
+        now = time.time()
         self._conn.execute(
-            "INSERT INTO ufactory_samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (time.time(), experiment_id, *raw.tolist(), *ext.tolist()),
+            "INSERT INTO ufactory_raw VALUES (?,?,?,?,?,?,?,?)", (now, experiment_id, *raw.tolist())
+        )
+        self._conn.execute(
+            "INSERT INTO ufactory_calibrated VALUES (?,?,?,?,?,?,?,?)", (now, experiment_id, *ext.tolist())
         )
         self._conn.commit()
 
     def log_homemade(self, channels: np.ndarray, cal: np.ndarray) -> None:
         with self._log._state_lock:
             experiment_id = self._log._experiment_id
+        now = time.time()
         self._conn.execute(
-            "INSERT INTO homemade_samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (time.time(), experiment_id, *channels.tolist(), *cal.tolist()),
+            "INSERT INTO homemade_raw VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (now, experiment_id, *channels.tolist()),
+        )
+        self._conn.execute(
+            "INSERT INTO homemade_calibrated VALUES (?,?,?,?,?,?,?,?)", (now, experiment_id, *cal.tolist())
         )
         self._conn.commit()
 
@@ -317,6 +340,49 @@ class HomemadeReader:
             self._serial.close()
 
 
+SAMPLE_TABLES = ("ufactory_raw", "ufactory_calibrated", "homemade_raw", "homemade_calibrated")
+
+
+def export_csv(db_path: Path) -> list[Path]:
+    """Dump each table to its own CSV -- 4 separate sensor files (raw/calibrated x
+    ufactory/homemade, never mixed together) plus experiments.csv and
+    run_metadata.csv, so nothing needs cross-referencing by hand. Label, session
+    type, and the labeled segment's own start time are joined into every sensor
+    row directly from the experiments table, using each table's own real columns
+    (via PRAGMA table_info) so this can't drift from the schema. Rerunnable
+    anytime against any session's DB, not just right after collecting it."""
+    stem = db_path.with_suffix("")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    written = []
+
+    def dump(name: str, query: str) -> None:
+        rows = conn.execute(query).fetchall()
+        out_path = Path(f"{stem}_{name}.csv")
+        with out_path.open("w", newline="") as fh:
+            writer = csv.writer(fh)
+            if rows:
+                writer.writerow(rows[0].keys())
+                writer.writerows(rows)
+        written.append(out_path)
+
+    dump("run_metadata", "SELECT * FROM run_metadata ORDER BY key")
+    dump("experiments", "SELECT * FROM experiments ORDER BY start_ts")
+    for table in SAMPLE_TABLES:
+        value_cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})") if row[1] not in ("ts", "experiment_id")]
+        cols = ", ".join(f"s.{c}" for c in value_cols)
+        dump(
+            table,
+            f"""
+            SELECT s.ts, e.label, e.session_type, e.start_ts AS experiment_start_ts, {cols}
+            FROM {table} s JOIN experiments e ON s.experiment_id = e.id
+            ORDER BY s.ts
+            """,
+        )
+    conn.close()
+    return written
+
+
 def _bar_color(pct: float) -> tuple[int, int, int]:
     if pct >= 90:
         return (220, 70, 70)
@@ -353,28 +419,63 @@ def _selftest() -> None:
     assert _bar_color(95) == (220, 70, 70)
     print("OK")
 
-    print("=== ExperimentLog: labels, pose, session_type, writer round-trip ===")
+    print("=== ExperimentLog: labels, session_type, writer round-trip ===")
     with tempfile.TemporaryDirectory() as d:
         db = Path(d) / "test.db"
-        log = ExperimentLog(db)
-        assert log.status == ("resting", "fast", 0)
+        log = ExperimentLog(db, session_type="slow")
+        assert log.status == ("resting", "slow")
         log.set_label("push +X")
-        log.new_pose()
-        assert log.status == ("push +X", "fast", 1)
-        log.set_session_type("slow")
-        assert log.status[1] == "slow"
+        assert log.status == ("push +X", "slow")
 
         writer = log.writer()
-        writer.log_ufactory(np.arange(6, dtype=float), np.arange(6, dtype=float) + 0.5)
-        writer.log_homemade(np.arange(CHANNELS, dtype=float), np.arange(6, dtype=float))
+        raw_uf = np.arange(6, dtype=float)
+        cal_uf = np.arange(6, dtype=float) + 0.5
+        raw_hm = np.arange(CHANNELS, dtype=float)
+        cal_hm = np.arange(6, dtype=float) + 1.5
+        writer.log_ufactory(raw_uf, cal_uf)
+        writer.log_homemade(raw_hm, cal_hm)
         log.close()
 
         conn = sqlite3.connect(db)
         experiments = conn.execute("SELECT label, end_ts FROM experiments").fetchall()
-        assert len(experiments) == 4, experiments
+        assert len(experiments) == 2, experiments
         assert all(row[1] is not None for row in experiments), "every segment must get an end_ts, including the last"
-        assert len(conn.execute("SELECT * FROM ufactory_samples").fetchall()) == 1
-        assert len(conn.execute("SELECT * FROM homemade_samples").fetchall()) == 1
+        # 4 separate tables, never mixed -- and each row really is what was logged, not
+        # e.g. raw and calibrated swapped or written to the wrong table.
+        for table in SAMPLE_TABLES:
+            assert len(conn.execute(f"SELECT * FROM {table}").fetchall()) == 1, table
+        assert conn.execute("SELECT fx,fy,fz,mx,my,mz FROM ufactory_raw").fetchone() == tuple(raw_uf)
+        assert conn.execute("SELECT fx,fy,fz,mx,my,mz FROM ufactory_calibrated").fetchone() == tuple(cal_uf)
+        assert conn.execute("SELECT ch1,ch16 FROM homemade_raw").fetchone() == (raw_hm[0], raw_hm[15])
+        assert conn.execute("SELECT fx,fy,fz,mx,my,mz FROM homemade_calibrated").fetchone() == tuple(cal_hm)
+    print("OK")
+
+    print("=== export_csv: 6 files, metadata + joined columns, row counts match the DB ===")
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "test.db"
+        log = ExperimentLog(db, session_type="slow")
+        log.set_metadata(xarm_ip="1.2.3.4", homemade_port="/dev/ttyACM0")
+        writer = log.writer()
+        log.set_label("push +X")
+        writer.log_ufactory(np.arange(6, dtype=float), np.arange(6, dtype=float))
+        writer.log_homemade(np.arange(CHANNELS, dtype=float), np.arange(6, dtype=float))
+        log.close()
+
+        paths = export_csv(db)
+        assert len(paths) == 6, paths  # run_metadata + experiments + 4 sensor tables
+        for path in paths:
+            assert path.exists(), path
+        import csv as _csv
+
+        with (Path(d) / "test_run_metadata.csv").open() as fh:
+            meta = {row["key"]: row["value"] for row in _csv.DictReader(fh)}
+        assert meta["xarm_ip"] == "1.2.3.4" and meta["homemade_port"] == "/dev/ttyACM0"
+
+        with (Path(d) / "test_ufactory_raw.csv").open() as fh:
+            rows = list(_csv.DictReader(fh))
+        assert len(rows) == 1
+        assert rows[0]["label"] == "push +X" and rows[0]["session_type"] == "slow"
+        assert set(rows[0]) == {"ts", "label", "session_type", "experiment_start_ts", "fx", "fy", "fz", "mx", "my", "mz"}
     print("OK")
 
     print("\nAll self-tests passed.")
@@ -407,7 +508,7 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
         raise ImportError("pygame is required. Install it with: pip install pygame")
 
     pygame.init()
-    screen = pygame.display.set_mode((980, 1560))
+    screen = pygame.display.set_mode((980, 1470))
     pygame.display.set_caption("FT Calibration Collector")
     font = pygame.font.Font(None, 40)
     small = pygame.font.Font(None, 30)
@@ -424,12 +525,6 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
                 elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
                     # ENTER: "I'm done with this action" -- same as SPACE, back to resting.
                     log.set_label(LABEL_KEYS["space"])
-                elif event.key == pygame.K_n:
-                    log.new_pose()
-                elif event.key == pygame.K_1:
-                    log.set_session_type("fast")
-                elif event.key == pygame.K_2:
-                    log.set_session_type("slow")
                 else:
                     key_name = pygame.key.name(event.key)
                     if key_name in LABEL_KEYS:
@@ -446,8 +541,8 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
         ), (20, y))
         y += 44
 
-        label, session_type, pose_index = log.status
-        status = f"[{label}]  session={session_type}  pose=#{pose_index}"
+        label, session_type = log.status
+        status = f"[{label}]  session={session_type}"
         screen.blit(font.render(status, True, (120, 220, 255)), (20, y))
         y += 44
         screen.blit(small.render(LABEL_INSTRUCTIONS.get(label, ""), True, (200, 200, 200)), (20, y))
@@ -482,8 +577,7 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
 
         legend = [
             "W/S A/D Q/E : push +/-X +/-Y +/-Z      R/F T/G Y/H : twist +/-X +/-Y +/-Z",
-            "C: combined    SPACE or ENTER: done with this action, back to resting",
-            "N: new pose    1/2: session fast/slow    ESC: quit",
+            "SPACE or ENTER: done with this action, back to resting      ESC: quit",
         ]
         for line in legend:
             screen.blit(small.render(line, True, (160, 160, 160)), (20, y))
@@ -502,18 +596,36 @@ def main() -> None:
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--calibration", type=Path, default=None, help="existing ft_calibration.json for the live homemade preview (optional)")
     p.add_argument("--db", type=Path, default=None, help="defaults to ft_calibration_session_<timestamp>.db")
+    p.add_argument(
+        "--session-type", choices=["fast", "slow"], default="fast",
+        help="fast: 2-3s cycles, lots of variety. slow: 15-20s ramps. Run each as a separate session -- don't mix.",
+    )
     p.add_argument("--selftest", action="store_true", help="run no-hardware self-tests and exit")
+    p.add_argument("--export-only", type=Path, default=None, help="re-export CSVs from an existing session DB, no hardware, and exit")
     args = p.parse_args()
 
     if args.selftest:
         _selftest()
         return
+    if args.export_only:
+        for path in export_csv(args.export_only):
+            print(f"wrote {path}")
+        return
     if not args.xarm_ip:
-        p.error("--xarm-ip is required (or pass --selftest)")
+        p.error("--xarm-ip is required (or pass --selftest / --export-only)")
 
     db_path = args.db or Path(f"ft_calibration_session_{int(time.time())}.db")
-    log = ExperimentLog(db_path)
-    print(f"Logging to {db_path}")
+    log = ExperimentLog(db_path, session_type=args.session_type)
+    log.set_metadata(
+        xarm_ip=args.xarm_ip,
+        homemade_port=args.homemade_port,
+        baud=args.baud,
+        calibration_file=str(args.calibration) if args.calibration else "",
+        session_type=args.session_type,
+        created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        created_ts=time.time(),
+    )
+    print(f"Logging to {db_path} (session_type={args.session_type})")
 
     ufactory = UFactoryReader(args.xarm_ip, log)
     homemade = HomemadeReader(args.homemade_port, args.baud, log, args.calibration)
@@ -527,6 +639,8 @@ def main() -> None:
         homemade.stop()
         log.close()
         print(f"Done. {db_path}")
+        for path in export_csv(db_path):
+            print(f"wrote {path}")
 
 
 if __name__ == "__main__":
