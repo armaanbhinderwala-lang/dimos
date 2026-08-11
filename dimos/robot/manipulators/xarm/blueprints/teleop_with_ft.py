@@ -132,6 +132,16 @@ keyboard_teleop_xarm7_ft_adaptive = autoconnect(
                 _xarm7_hw,
                 robot_model=_xarm7_control_model,
                 timeout=0.0,
+                # Scoped to this blueprint only. joint_centering_cost was 0 (off) --
+                # biases the redundant joint toward mid-range every solve, keeping
+                # the arm off the singular configs that caused a real error-53 fault.
+                # lm_damping raised too; this task doesn't need precision tracking.
+                # Unverified starting values.
+                control_ik={
+                    "joint_centering_cost": 0.02,
+                    "lm_damping": 1e-2,
+                    "damping_cost": 0.01,
+                },
             ),
             TaskConfig(
                 name="servo_gripper",

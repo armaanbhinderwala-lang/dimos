@@ -77,6 +77,15 @@ class AdmittanceConfig:
     decel_full_m: float = 0.25
     decel_floor_scale: float = 0.35
 
+    # Manipulability (smallest singular value of the tool Jacobian) below which speed
+    # tapers off, reaching zero at singularity_sigma_stop -- see _singularity_speed_scale.
+    # UNVERIFIED placeholders: motivated by a real hardware fault (a joint snap near a
+    # singularity tripped the FT sensor's own overload protection, error 53) but these
+    # exact thresholds have no calibration data yet. The module logs sigma_min every
+    # tick summary specifically so real numbers can replace these.
+    singularity_sigma_caution: float = 0.05
+    singularity_sigma_stop: float = 0.01
+
 
 @dataclass
 class TwistResult:
@@ -109,6 +118,19 @@ def _progress_scale(progress_m: float, decel_start_m: float, decel_full_m: float
     return 1.0 - frac * (1.0 - floor)
 
 
+def singularity_speed_scale(sigma_min: float, sigma_caution: float, sigma_stop: float) -> float:
+    """1.0 when well-conditioned (sigma_min >= sigma_caution), tapering linearly to 0.0 at
+    sigma_min <= sigma_stop. sigma_min is the smallest singular value of the tool-frame
+    Jacobian -- as it shrinks, a small commanded Cartesian twist demands a disproportionately
+    large joint velocity to track, which is the actual mechanism (not resistance, not gain
+    instability) behind a sudden joint "snap" near a singularity."""
+    if sigma_min >= sigma_caution:
+        return 1.0
+    if sigma_min <= sigma_stop:
+        return 0.0
+    return (sigma_min - sigma_stop) / (sigma_caution - sigma_stop)
+
+
 def compute_twist(
     force_tool: np.ndarray,
     torque_tool: np.ndarray,
@@ -116,10 +138,15 @@ def compute_twist(
     drive_direction_world: np.ndarray,
     cfg: AdmittanceConfig,
     progress_m: float = 0.0,
+    singularity_scale: float = 1.0,
 ) -> TwistResult:
     """progress_m: total drive distance covered so far this pull (module tracks and passes
     this in) -- resistance alone can't signal "slow down now," since it's lowest right when
-    a latch just released, exactly the moment that needs care, not speed."""
+    a latch just released, exactly the moment that needs care, not speed.
+
+    singularity_scale: 0..1, computed by the module from the live Jacobian (see
+    singularity_speed_scale) and passed in -- kept out of this function's own math since it
+    needs the robot's kinematic model, which this pure law deliberately has no dependency on."""
     f_world, m_world = rotate_wrench_to_world(force_tool, torque_tool, ee_rot)
     resistance_force = float(np.linalg.norm(f_world))
     torque_mag = float(np.linalg.norm(m_world))
@@ -145,7 +172,9 @@ def compute_twist(
     if omega_norm > cfg.max_rotation_rate:
         omega *= cfg.max_rotation_rate / omega_norm
 
-    return TwistResult(v_drive + v_lateral, omega, resistance_force, torque_mag, False)
+    linear = (v_drive + v_lateral) * singularity_scale
+    angular = omega * singularity_scale
+    return TwistResult(linear, angular, resistance_force, torque_mag, False)
 
 
 if __name__ == "__main__":
@@ -218,5 +247,20 @@ if __name__ == "__main__":
     r_far = compute_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]), cfg, progress_m=0.40)
     print(f"far-progress linear={r_far.linear} (expect {cfg.drive_speed * cfg.decel_floor_scale:.4f} along x)")
     assert np.isclose(r_far.linear[0], cfg.drive_speed * cfg.decel_floor_scale)
+
+    print("\n=== Case 10: singularity scaling -- well-conditioned unaffected, tapers to exactly zero at/below sigma_stop ===")
+    sigmas = [0.20, 0.05, 0.03, 0.01, 0.005]
+    sing_scales = [singularity_speed_scale(s, cfg.singularity_sigma_caution, cfg.singularity_sigma_stop) for s in sigmas]
+    print(list(zip(sigmas, sing_scales, strict=True)))
+    assert sing_scales[0] == 1.0, "well-conditioned (sigma_min >= caution) must be unaffected"
+    assert sing_scales[-1] == 0.0 and sing_scales[-2] == 0.0, "at/below sigma_stop must be exactly zero, not just small"
+    assert all(sing_scales[i] >= sing_scales[i + 1] for i in range(len(sing_scales) - 1)), "must not increase as sigma_min shrinks"
+    # Direct check against compute_twist: same no-resistance case as Case 1, but near-singular --
+    # output should scale down proportionally, not just the drive term.
+    r_sing = compute_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]), cfg, singularity_scale=0.5)
+    print(f"half-scale linear={r_sing.linear} (expect {cfg.drive_speed * 0.5:.4f} along x)")
+    assert np.isclose(r_sing.linear[0], cfg.drive_speed * 0.5)
+    r_sing_stop = compute_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]), cfg, singularity_scale=0.0)
+    assert np.allclose(r_sing_stop.linear, 0) and np.allclose(r_sing_stop.angular, 0)
 
     print("\nAll self-tests passed.")

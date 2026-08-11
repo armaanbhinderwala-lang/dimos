@@ -50,7 +50,11 @@ import pinocchio
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
-from dimos.hardware.sensors.force_torque.admittance_pull_law import AdmittanceConfig, compute_twist
+from dimos.hardware.sensors.force_torque.admittance_pull_law import (
+    AdmittanceConfig,
+    compute_twist,
+    singularity_speed_scale,
+)
 from dimos.manipulation.planning.utils.mesh_utils import prepare_urdf_for_drake
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
@@ -126,6 +130,7 @@ class PhaseStats:
     ticks: int = 0
     safety_tripped: bool = False
     stop_reason: str = ""
+    min_sigma: float = float("inf")  # smallest manipulability seen this phase
 
 
 class FTAdaptivePullModule(Module):
@@ -200,6 +205,12 @@ class FTAdaptivePullModule(Module):
         too_high = q >= self._q_upper - margin_rad
         hits = np.where(too_low | too_high)[0]
         return int(hits[0]) if len(hits) else None
+
+    def _manipulability(self, q: np.ndarray) -> float:
+        """Smallest singular value of the tool-frame Jacobian -- backstop only, see AdmittanceConfig."""
+        pinocchio.computeJointJacobians(self._pin_model, self._pin_data, q)
+        jac = pinocchio.getFrameJacobian(self._pin_model, self._pin_data, self._frame_id, pinocchio.LOCAL_WORLD_ALIGNED)
+        return float(np.linalg.svd(jac, compute_uv=False)[-1])
 
     def _on_start_pull_command(self, msg: Bool) -> None:
         if not msg.data:
@@ -283,9 +294,17 @@ class FTAdaptivePullModule(Module):
             if stats.ticks < 3:
                 logger.info("[%s] EE pose tick %d: translation=%s -- sanity check this", name, stats.ticks, pose.translation)
 
+            sigma_min = self._manipulability(q)
+            sing_scale = singularity_speed_scale(sigma_min, cfg.singularity_sigma_caution, cfg.singularity_sigma_stop)
+            if sing_scale <= 0.0:
+                logger.warning("[%s] Near a kinematic singularity (sigma_min=%.4f) -- stopping.", name, sigma_min)
+                stats.stop_reason = "near singularity"
+                break
+
             drive_direction_world = ee_rot @ self._local_drive
             result = compute_twist(
-                force_tool, torque_tool, ee_rot, drive_direction_world, cfg, progress_m=stats.distance_covered
+                force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
+                progress_m=stats.distance_covered, singularity_scale=sing_scale,
             )
 
             if result.safety_stop:
@@ -310,20 +329,21 @@ class FTAdaptivePullModule(Module):
             self.peak_resistance_force = max(self.peak_resistance_force, result.resistance_force)
             self.motion_count += 1
 
+            stats.min_sigma = min(stats.min_sigma, sigma_min)
             if stats.ticks % 25 == 0:
                 logger.info(
-                    "[%s tick %d] resistance=%.1fN torque=%.1fNm |v|=%.3fm/s |omega|=%.3frad/s covered=%.1fcm",
+                    "[%s tick %d] resistance=%.1fN torque=%.1fNm |v|=%.3fm/s |omega|=%.3frad/s covered=%.1fcm sigma_min=%.4f",
                     name, stats.ticks, result.resistance_force, result.torque_mag,
                     float(np.linalg.norm(result.linear)), float(np.linalg.norm(result.angular)),
-                    stats.distance_covered * 100,
+                    stats.distance_covered * 100, sigma_min,
                 )
 
             await asyncio.sleep(dt)
 
         logger.info(
-            "[%s] done (%s): %d ticks, %.1fcm, peak_force=%.1fN peak_torque=%.1fNm",
+            "[%s] done (%s): %d ticks, %.1fcm, peak_force=%.1fN peak_torque=%.1fNm min_sigma=%.4f",
             name, stats.stop_reason or "external stop", stats.ticks, stats.distance_covered * 100,
-            stats.peak_resistance_force, stats.peak_torque,
+            stats.peak_resistance_force, stats.peak_torque, stats.min_sigma,
         )
         return stats
 
