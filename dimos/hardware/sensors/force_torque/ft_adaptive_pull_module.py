@@ -94,7 +94,15 @@ class FTAdaptivePullConfig(ModuleConfig):
     # heavy the door is; the calibrated cutoffs below are what adapts to the
     # door, not the pace.
     execute_speed: float = 0.02  # m/s
-    execute_target_m: float = 0.45  # m -- generous, "almost open" for most doors
+    # This is LINEAR drive-direction travel, not an opening angle -- arc length
+    # ~= handle_radius * angle, so the same distance target covers proportionally
+    # less angle on a wide-swing door (found in sim_multi_door_test.py: a
+    # large-radius door stalled around half-open at the old 0.45m default while
+    # a smaller one finished fine). 0.8m is a generous ceiling for now;
+    # max_duration is still the real backstop regardless. A proper fix would
+    # size this off a measured radius (constraint_estimator.py could supply
+    # one) rather than one fixed guess -- not done yet.
+    execute_target_m: float = 0.8  # m
     max_duration: float = 30.0  # s, safety net for the execute phase
 
     # Execute-phase cutoffs = max(probe_peak * cutoff_safety_margin, min_*) --

@@ -94,3 +94,6 @@ yolo11n*.pt
 # Generic ignore patterns
 *.ignore
 *.ignore.*
+
+# Local-only notes, never pushed
+*.local.md
