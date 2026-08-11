@@ -215,6 +215,7 @@ class UFactoryReader:
         self._log = log
         self._dt = 1.0 / rate_hz
         self._running = False
+        self.latest_raw = np.zeros(6)
         self.latest_ext = np.zeros(6)
 
     def start(self) -> None:
@@ -239,6 +240,7 @@ class UFactoryReader:
         while self._running:
             raw = np.array(self._arm.ft_raw_force, dtype=float)
             ext = np.array(self._arm.ft_ext_force, dtype=float)
+            self.latest_raw = raw
             self.latest_ext = ext
             writer.log_ufactory(raw, ext)
             time.sleep(self._dt)
@@ -258,6 +260,7 @@ class HomemadeReader:
         self._running = False
         self._buffers = [deque(maxlen=window) for _ in range(CHANNELS)]
         self._matrix, self._bias = (load_calibration(calibration) if calibration else (None, None))
+        self.latest_channels = np.zeros(CHANNELS)
         self.latest_cal = np.zeros(6)
 
     def start(self) -> None:
@@ -284,6 +287,7 @@ class HomemadeReader:
                 buf.append(value)
             channels = np.array([float(np.mean(b)) for b in self._buffers])
             cal = self._matrix @ channels + self._bias if self._matrix is not None else np.zeros(6)
+            self.latest_channels = channels
             self.latest_cal = cal
             writer.log_homemade(channels, cal)
 
@@ -377,7 +381,7 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
         raise ImportError("pygame is required. Install it with: pip install pygame")
 
     pygame.init()
-    screen = pygame.display.set_mode((640, 660))
+    screen = pygame.display.set_mode((640, 940))
     pygame.display.set_caption("FT Calibration Collector")
     font = pygame.font.Font(None, 26)
     small = pygame.font.Font(None, 20)
@@ -414,15 +418,30 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
         screen.blit(font.render(status, True, (120, 220, 255)), (16, y))
         y += 36
 
-        screen.blit(font.render("uFactory (trusted reference)", True, (200, 200, 200)), (16, y))
+        screen.blit(font.render("uFactory -- raw", True, (200, 200, 200)), (16, y))
+        y += 26
+        y = _draw_bars(screen, small, y, ufactory.latest_raw)
+
+        y += 20
+        screen.blit(font.render("uFactory -- compensated (trusted reference)", True, (200, 200, 200)), (16, y))
         y += 26
         y = _draw_bars(screen, small, y, ufactory.latest_ext)
 
         y += 20
-        screen.blit(font.render("Homemade (calibrated preview)", True, (200, 200, 200)), (16, y))
+        screen.blit(font.render("Homemade -- calibrated (openft_module.py's matrix, not fully trusted yet)", True, (200, 200, 200)), (16, y))
         y += 26
         y = _draw_bars(screen, small, y, homemade.latest_cal)
-        y += 10
+
+        y += 20
+        screen.blit(font.render("Homemade -- raw (16 channels, plain values, no assumed scale)", True, (200, 200, 200)), (16, y))
+        y += 26
+        channels = homemade.latest_channels
+        for row in range(4):
+            for col in range(4):
+                idx = row * 4 + col
+                text = f"ch{idx + 1:>2}: {channels[idx]:9.1f}"
+                screen.blit(small.render(text, True, (200, 200, 200)), (16 + col * 155, y + row * 22))
+        y += 4 * 22 + 10
 
         legend = [
             "W/S A/D Q/E : push +/-X +/-Y +/-Z    R/F T/G Y/H : twist +/-X +/-Y +/-Z",
