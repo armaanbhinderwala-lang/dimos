@@ -54,6 +54,7 @@ from dimos.hardware.sensors.force_torque.admittance_pull_law import (
     AdmittanceConfig,
     compute_twist,
     singularity_speed_scale,
+    slew_limit,
 )
 from dimos.manipulation.planning.utils.mesh_utils import prepare_urdf_for_drake
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
@@ -264,6 +265,7 @@ class FTAdaptivePullModule(Module):
         stats = PhaseStats()
         dt = 1.0 / self.config.control_rate_hz
         start_time = time.time()
+        prev_linear, prev_angular = np.zeros(3), np.zeros(3)
 
         while self._running and not self._stop_requested:
             if time.time() - start_time > max_duration:
@@ -316,16 +318,23 @@ class FTAdaptivePullModule(Module):
                 stats.stop_reason = "safety cutoff"
                 break
 
+            # Jerk limit: cap how much the PUBLISHED twist can change from last tick,
+            # regardless of what compute_twist just jumped to. Stats/progress track
+            # the actual limited command, not the raw target.
+            linear_cmd = slew_limit(prev_linear, result.linear, cfg.max_linear_accel * dt)
+            angular_cmd = slew_limit(prev_angular, result.angular, cfg.max_angular_accel * dt)
+            prev_linear, prev_angular = linear_cmd, angular_cmd
+
             self.coordinator_ee_twist_command.publish(
-                TwistStamped(frame_id=self.config.task_name, linear=list(result.linear), angular=list(result.angular))
+                TwistStamped(frame_id=self.config.task_name, linear=list(linear_cmd), angular=list(angular_cmd))
             )
-            stats.distance_covered += float(np.linalg.norm(result.linear) * dt)
-            stats.rotation_covered += float(np.linalg.norm(result.angular) * dt)
+            stats.distance_covered += float(np.linalg.norm(linear_cmd) * dt)
+            stats.rotation_covered += float(np.linalg.norm(angular_cmd) * dt)
             stats.peak_resistance_force = max(stats.peak_resistance_force, result.resistance_force)
             stats.peak_torque = max(stats.peak_torque, result.torque_mag)
             stats.ticks += 1
-            self.total_pull_distance += float(np.linalg.norm(result.linear) * dt)
-            self.total_rotation += float(np.linalg.norm(result.angular) * dt)
+            self.total_pull_distance += float(np.linalg.norm(linear_cmd) * dt)
+            self.total_rotation += float(np.linalg.norm(angular_cmd) * dt)
             self.peak_resistance_force = max(self.peak_resistance_force, result.resistance_force)
             self.motion_count += 1
 
@@ -334,7 +343,7 @@ class FTAdaptivePullModule(Module):
                 logger.info(
                     "[%s tick %d] resistance=%.1fN torque=%.1fNm |v|=%.3fm/s |omega|=%.3frad/s covered=%.1fcm sigma_min=%.4f",
                     name, stats.ticks, result.resistance_force, result.torque_mag,
-                    float(np.linalg.norm(result.linear)), float(np.linalg.norm(result.angular)),
+                    float(np.linalg.norm(linear_cmd)), float(np.linalg.norm(angular_cmd)),
                     stats.distance_covered * 100, sigma_min,
                 )
 

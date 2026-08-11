@@ -128,15 +128,36 @@ keyboard_teleop_xarm7_ft_adaptive = autoconnect(
         joint_state_frame_id="coordinator",
         hardware=[_xarm7_hw],
         tasks=[
-            # Reverted a control_ik override here (joint_centering_cost/lm_damping) --
-            # this task is shared with manual WASD jogging, not just the automated
-            # pull, and the constant centering bias fought normal jog commands.
-            # Singularity handling now lives only in the module-level backstop
-            # (ft_adaptive_pull_module.py), which is active only during a pull.
+            # Unchanged from keyboard_teleop_xarm7_ft -- teleop's own task, default
+            # control_ik, never touched by pull tuning.
             eef_twist_task(
                 _xarm7_hw,
                 robot_model=_xarm7_control_model,
                 timeout=0.0,
+            ),
+            # Separate task, only FTAdaptivePullModule publishes to it (see
+            # task_name below). Higher priority (15 > 10) so it wins per-joint
+            # arbitration WHILE actively pulling; EEFTwistTask.is_active() goes
+            # False the instant it gets a zero twist, releasing the claim back to
+            # teleop the moment a pull stops -- confirmed in eef_twist_task.py.
+            # Its own control_ik is safe to tune for singularity robustness since
+            # nothing else uses this task: root-caused from a real hardware fault
+            # (a joint snapped near a singularity, tripping the FT sensor's own
+            # overload protection, error 53). joint_centering_cost was 0 (off);
+            # it biases the redundant joint toward mid-range every solve.
+            # lm_damping raised too -- this task doesn't need precision tracking.
+            # Unverified starting values.
+            eef_twist_task(
+                _xarm7_hw,
+                name="ft_pull_twist",
+                priority=15,
+                robot_model=_xarm7_control_model,
+                timeout=0.0,
+                control_ik={
+                    "joint_centering_cost": 0.02,
+                    "lm_damping": 1e-2,
+                    "damping_cost": 0.01,
+                },
             ),
             TaskConfig(
                 name="servo_gripper",
@@ -159,6 +180,7 @@ keyboard_teleop_xarm7_ft_adaptive = autoconnect(
         package_paths=_xarm7_control_model.package_paths,
         xacro_args=_xarm7_control_model.xacro_args,
         tool_frame_name="link7",
+        task_name="ft_pull_twist",
         auto_run=False,
     ),
     WrenchPlotter.blueprint(),

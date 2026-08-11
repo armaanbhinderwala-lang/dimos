@@ -77,6 +77,16 @@ class AdmittanceConfig:
     decel_full_m: float = 0.25
     decel_floor_scale: float = 0.35
 
+    # Jerk limit -- caps how much the PUBLISHED twist can change tick-to-tick,
+    # independent of what compute_twist would otherwise jump straight to. Same
+    # role as acceleration/jerk limiting on any industrial motion controller:
+    # protects against a single discontinuous command reaching the joints
+    # instantly, whatever caused the discontinuity (sensor glitch, a real force
+    # snag, a singularity). Applied by the module (see slew_limit), not here --
+    # needs cross-tick state this pure function doesn't keep.
+    max_linear_accel: float = 0.5  # m/s^2, UNVERIFIED
+    max_angular_accel: float = 3.0  # rad/s^2, UNVERIFIED
+
     # Manipulability (smallest singular value of the tool Jacobian) below which speed
     # tapers off, reaching zero at singularity_sigma_stop -- see _singularity_speed_scale.
     # UNVERIFIED placeholders: motivated by a real hardware fault (a joint snap near a
@@ -100,6 +110,15 @@ def rotate_wrench_to_world(force_tool: np.ndarray, torque_tool: np.ndarray, ee_r
     """ee_rot: 3x3 world_R_tool. Wrench axes rotate the same way any vector does, no r x F correction --
     that would only apply if changing which POINT the wrench is measured about, not just its frame."""
     return ee_rot @ force_tool, ee_rot @ torque_tool
+
+
+def slew_limit(prev: np.ndarray, target: np.ndarray, max_delta: float) -> np.ndarray:
+    """Move from prev toward target by at most max_delta. Direction-preserving, not per-axis."""
+    delta = target - prev
+    norm = np.linalg.norm(delta)
+    if norm <= max_delta or norm < 1e-12:
+        return target
+    return prev + delta * (max_delta / norm)
 
 
 def _speed_scale(resistance_force: float, bands: list[tuple[float, float]]) -> float:
@@ -262,5 +281,16 @@ if __name__ == "__main__":
     assert np.isclose(r_sing.linear[0], cfg.drive_speed * 0.5)
     r_sing_stop = compute_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]), cfg, singularity_scale=0.0)
     assert np.allclose(r_sing_stop.linear, 0) and np.allclose(r_sing_stop.angular, 0)
+
+    print("\n=== Case 11: slew limiting -- caps a discontinuous jump, passes through small changes unchanged ===")
+    prev = np.array([0.02, 0.0, 0.0])
+    big_jump = np.array([0.02, 0.5, 0.0])  # a 0.5 m/s sideways jump in one tick
+    limited = slew_limit(prev, big_jump, max_delta=0.05)
+    print(f"prev={prev} target={big_jump} limited={limited} |delta|={np.linalg.norm(limited - prev):.4f}")
+    assert np.isclose(np.linalg.norm(limited - prev), 0.05), "must move exactly max_delta toward target, not jump"
+    step, full = limited - prev, big_jump - prev
+    assert np.allclose(step / np.linalg.norm(step), full / np.linalg.norm(full)), "step direction must match prev->target"
+    small_change = prev + np.array([0.0, 0.01, 0.0])
+    assert np.allclose(slew_limit(prev, small_change, max_delta=0.05), small_change), "small changes pass through untouched"
 
     print("\nAll self-tests passed.")
