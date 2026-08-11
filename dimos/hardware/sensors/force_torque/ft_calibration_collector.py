@@ -26,11 +26,13 @@ sensor + grip/weight holder, per the "post payload identification" setup):
     module isn't part of this branch -- kept intentionally tiny so it can't
     drift from the real driver's math).
 
-6-bar live display shows uFactory's compensated reading (the trustworthy,
-factory-calibrated one) as %% of the sensor's own RATED range (not overload --
-150N Fx/Fy, 200N Fz, 4N*m any torque axis, same datasheet numbers used for the
-door-pull cutoffs), so "stop at 90%%" means 90%% of rated, comfortably under
-the ~150%% overload trip.
+Two 6-bar banks, same scale for both (uFactory's own RATED range -- not
+overload -- 150N Fx/Fy, 200N Fz, 4N*m any torque axis, same datasheet numbers
+used for the door-pull cutoffs): uFactory's compensated reading on top (the
+trustworthy, factory-calibrated one -- this is what "stop at 90%%" means), and
+the homemade sensor's live calibrated preview below it on the identical scale,
+so you can watch how well the homemade calibration is tracking a trusted
+reference while you collect.
 
 Labeling keys mirror KeyboardTeleopModule's jog layout exactly (push = the
 translation keys, twist = the rotation keys) -- same layout, no new scheme to
@@ -354,12 +356,28 @@ def _selftest() -> None:
     print("\nAll self-tests passed.")
 
 
+def _draw_bars(screen: "pygame.Surface", small: "pygame.font.Font", y: int, values: np.ndarray) -> int:
+    """Draw one 6-bar bank at y; returns the y position just below it."""
+    for i, name in enumerate(AXIS_NAMES):
+        pct = 100.0 * abs(values[i]) / RATED_RANGE[i]
+        bar_w = int(min(pct, 100) / 100 * 400)
+        color = _bar_color(pct)
+        pygame.draw.rect(screen, (60, 60, 65), (140, y, 400, 22))
+        pygame.draw.rect(screen, color, (140, y, bar_w, 22))
+        pygame.draw.line(screen, (255, 255, 255), (140 + 360, y), (140 + 360, y + 22), 2)  # 90% line
+        unit = "N" if i < 3 else "N*m"
+        screen.blit(small.render(name, True, (220, 220, 220)), (16, y + 2))
+        screen.blit(small.render(f"{values[i]:.1f}{unit} ({pct:.0f}%)", True, (220, 220, 220)), (550, y + 2))
+        y += 30
+    return y
+
+
 def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLog) -> None:
     if pygame is None:
         raise ImportError("pygame is required. Install it with: pip install pygame")
 
     pygame.init()
-    screen = pygame.display.set_mode((640, 520))
+    screen = pygame.display.set_mode((640, 660))
     pygame.display.set_caption("FT Calibration Collector")
     font = pygame.font.Font(None, 26)
     small = pygame.font.Font(None, 20)
@@ -396,24 +414,15 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
         screen.blit(font.render(status, True, (120, 220, 255)), (16, y))
         y += 36
 
-        ext = ufactory.latest_ext
-        for i, name in enumerate(AXIS_NAMES):
-            pct = 100.0 * abs(ext[i]) / RATED_RANGE[i]
-            bar_w = int(min(pct, 100) / 100 * 400)
-            color = _bar_color(pct)
-            pygame.draw.rect(screen, (60, 60, 65), (140, y, 400, 22))
-            pygame.draw.rect(screen, color, (140, y, bar_w, 22))
-            pygame.draw.line(screen, (255, 255, 255), (140 + 360, y), (140 + 360, y + 22), 2)  # 90% line
-            unit = "N" if i < 3 else "N*m"
-            screen.blit(small.render(f"{name}", True, (220, 220, 220)), (16, y + 2))
-            screen.blit(small.render(f"{ext[i]:.1f}{unit} ({pct:.0f}%)", True, (220, 220, 220)), (550, y + 2))
-            y += 30
+        screen.blit(font.render("uFactory (trusted reference)", True, (200, 200, 200)), (16, y))
+        y += 26
+        y = _draw_bars(screen, small, y, ufactory.latest_ext)
 
+        y += 20
+        screen.blit(font.render("Homemade (calibrated preview)", True, (200, 200, 200)), (16, y))
+        y += 26
+        y = _draw_bars(screen, small, y, homemade.latest_cal)
         y += 10
-        cal = homemade.latest_cal
-        cal_text = "homemade cal: " + " ".join(f"{n}={v:.2f}" for n, v in zip(AXIS_NAMES, cal, strict=True))
-        screen.blit(small.render(cal_text, True, (180, 180, 180)), (16, y))
-        y += 40
 
         legend = [
             "W/S A/D Q/E : push +/-X +/-Y +/-Z    R/F T/G Y/H : twist +/-X +/-Y +/-Z",
