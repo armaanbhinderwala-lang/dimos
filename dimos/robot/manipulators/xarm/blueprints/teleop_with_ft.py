@@ -40,6 +40,7 @@ from dimos.hardware.sensors.force_torque.read_FTModule import XArmFTSensor
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
 from dimos.robot.manipulators.common.blueprints import GripperTaskOverrides, eef_twist_task
+from dimos.robot.manipulators.xarm.blueprints.force_torque import FTRecorder
 from dimos.robot.manipulators.xarm.config import (
     XARM_GRIPPER_PARAMS,
     make_xarm6_model_config,
@@ -107,6 +108,12 @@ keyboard_teleop_xarm7_ft = autoconnect(
         auto_run=False,
     ),
     WrenchPlotter.blueprint(),
+    # Same wrench streams the plotter draws, persisted to SQLite: one memory2
+    # stream per port, each observation a full 6-axis wrench (force xyz +
+    # torque xyz). db_path is passed explicitly because pydantic skips
+    # validators on defaults, so RecorderConfig._resolve_path only fires for an
+    # explicit value - otherwise the db lands in the worker's cwd.
+    FTRecorder.blueprint(db_path="ft_teleop_recording.db"),
 ).transports(_ft_transports)
 
 # Same as keyboard_teleop_xarm7_ft, but FTAdaptivePullModule (general
