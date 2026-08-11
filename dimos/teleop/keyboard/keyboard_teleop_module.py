@@ -27,6 +27,7 @@ Keyboard controls:
     [: Open gripper
     ]: Close gripper
     ENTER: Start FT pull (if an FTPullModule is connected; no-op otherwise)
+    SPACE: Stop an in-progress FT pull immediately (no-op otherwise)
     ESC: Quit
 """
 
@@ -116,8 +117,9 @@ class KeyboardTeleopModule(Module):
 
     coordinator_ee_twist_command: Out[TwistStamped]
     joint_command: Out[JointState]
-    # Unused unless something (FTPullModule) is connected to it -- harmless no-op otherwise.
+    # Unused unless something (FTPullModule/FTAdaptivePullModule) is connected -- harmless no-op otherwise.
     start_pull_command: Out[Bool]
+    stop_pull_command: Out[Bool]
 
     _stop_event: threading.Event
     _thread: threading.Thread | None = None
@@ -206,6 +208,7 @@ class KeyboardTeleopModule(Module):
                 ("Y/H", "+Yaw/-Yaw"),
                 ("[/]", "Open/close gripper"),
                 ("ENTER", "Start FT pull"),
+                ("SPACE", "Stop FT pull"),
                 ("ESC", "Quit"),
             ]
             for key, desc in controls:
@@ -241,6 +244,8 @@ class KeyboardTeleopModule(Module):
                 self._set_gripper_position(GRIPPER_CLOSED_POSITION)
             elif event.key == pygame.K_RETURN:
                 self.start_pull_command.publish(Bool(data=True))
+            elif event.key == pygame.K_SPACE:
+                self.stop_pull_command.publish(Bool(data=True))
         elif event.type == pygame.KEYUP and event.key in _motion_key_codes():
             held_motion_keys.discard(event.key)
             linear, angular = _twist_from_keys(

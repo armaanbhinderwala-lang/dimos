@@ -123,9 +123,10 @@ class FTPullModule(Module):
     ext_wrench: In[WrenchStamped]
     coordinator_joint_state: In[JointState]
     coordinator_ee_twist_command: Out[TwistStamped]
-    # Same name as KeyboardTeleopModule's output -- autoconnect wires them
+    # Same names as KeyboardTeleopModule's outputs -- autoconnect wires them
     # without remapping when both are in one blueprint.
     start_pull_command: In[Bool]
+    stop_pull_command: In[Bool]
 
     _lock: threading.Lock
     _latest_force: np.ndarray | None = None
@@ -183,6 +184,7 @@ class FTPullModule(Module):
         self.ext_wrench.subscribe(self._on_wrench)
         self.coordinator_joint_state.subscribe(self._on_joint_state)
         self.start_pull_command.subscribe(self._on_start_pull_command)
+        self.stop_pull_command.subscribe(self._on_stop_pull_command)
         logger.info("FTPullModule ready (tool_frame=%s)", self.config.tool_frame_name)
         if self.config.auto_run:
             self.spawn(self._pull_loop())
@@ -207,6 +209,12 @@ class FTPullModule(Module):
             return
         logger.info("start_pull_command received -- starting pull")
         self.spawn(self._pull_loop())
+
+    def _on_stop_pull_command(self, msg: Bool) -> None:
+        if not msg.data:
+            return
+        logger.info("stop_pull_command received -- stopping pull")
+        self._stop_requested = True
 
     def _on_wrench(self, msg: WrenchStamped) -> None:
         with self._lock:

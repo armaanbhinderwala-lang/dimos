@@ -129,6 +129,7 @@ class FTAdaptivePullModule(Module):
     coordinator_joint_state: In[JointState]
     coordinator_ee_twist_command: Out[TwistStamped]
     start_pull_command: In[Bool]
+    stop_pull_command: In[Bool]
 
     _lock: threading.Lock
     _latest_wrench: np.ndarray | None = None  # [Fx,Fy,Fz,Mx,My,Mz], tool frame
@@ -176,6 +177,7 @@ class FTAdaptivePullModule(Module):
         self.ext_wrench.subscribe(self._on_wrench)
         self.coordinator_joint_state.subscribe(self._on_joint_state)
         self.start_pull_command.subscribe(self._on_start_pull_command)
+        self.stop_pull_command.subscribe(self._on_stop_pull_command)
         logger.info("FTAdaptivePullModule ready (tool_frame=%s)", self.config.tool_frame_name)
         if self.config.auto_run:
             self.spawn(self._pull_loop())
@@ -199,6 +201,12 @@ class FTAdaptivePullModule(Module):
             return
         logger.info("start_pull_command received -- starting adaptive pull")
         self.spawn(self._pull_loop())
+
+    def _on_stop_pull_command(self, msg: Bool) -> None:
+        if not msg.data:
+            return
+        logger.info("stop_pull_command received -- stopping pull")
+        self._stop_requested = True
 
     def _on_wrench(self, msg: WrenchStamped) -> None:
         with self._lock:
