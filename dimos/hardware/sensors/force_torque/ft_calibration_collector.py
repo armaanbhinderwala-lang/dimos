@@ -81,6 +81,26 @@ LABEL_KEYS = {
     "c": "combined", "space": "resting",
 }
 
+# Shown on screen for whichever label is currently active. Exact physical +/- direction
+# depends on how the sensor is mounted -- watch the matching bar (named in each line) to
+# confirm you're actually exciting the axis you think you are, not guessing from the label.
+LABEL_INSTRUCTIONS = {
+    "push +X": "Push the grip straight along +X. Watch the Fx bar.",
+    "push -X": "Push the grip straight along -X. Watch the Fx bar.",
+    "push +Y": "Push the grip straight along +Y. Watch the Fy bar.",
+    "push -Y": "Push the grip straight along -Y. Watch the Fy bar.",
+    "push +Z": "Push the grip straight along +Z. Watch the Fz bar.",
+    "push -Z": "Push the grip straight along -Z. Watch the Fz bar.",
+    "twist +X": "Twist the grip about X (roll). Watch the Mx bar.",
+    "twist -X": "Twist the grip the other way about X. Watch the Mx bar.",
+    "twist +Y": "Twist the grip about Y (pitch). Watch the My bar.",
+    "twist -Y": "Twist the grip the other way about Y. Watch the My bar.",
+    "twist +Z": "Twist the grip about Z (yaw). Watch the Mz bar.",
+    "twist -Z": "Twist the grip the other way about Z. Watch the Mz bar.",
+    "combined": "Push and twist at the same time, on purpose.",
+    "resting": "Let go completely. Ignore the first second after releasing.",
+}
+
 
 def parse_frame(line: str) -> list[float] | None:
     """Same wire format as openft_module.py -- 16 comma-separated channels, trailing comma."""
@@ -360,19 +380,25 @@ def _selftest() -> None:
     print("\nAll self-tests passed.")
 
 
+BAR_X = 210
+BAR_W = 520
+BAR_H = 30
+ROW_STEP = 40
+
+
 def _draw_bars(screen: "pygame.Surface", small: "pygame.font.Font", y: int, values: np.ndarray) -> int:
     """Draw one 6-bar bank at y; returns the y position just below it."""
     for i, name in enumerate(AXIS_NAMES):
         pct = 100.0 * abs(values[i]) / RATED_RANGE[i]
-        bar_w = int(min(pct, 100) / 100 * 400)
+        bar_w = int(min(pct, 100) / 100 * BAR_W)
         color = _bar_color(pct)
-        pygame.draw.rect(screen, (60, 60, 65), (140, y, 400, 22))
-        pygame.draw.rect(screen, color, (140, y, bar_w, 22))
-        pygame.draw.line(screen, (255, 255, 255), (140 + 360, y), (140 + 360, y + 22), 2)  # 90% line
+        pygame.draw.rect(screen, (60, 60, 65), (BAR_X, y, BAR_W, BAR_H))
+        pygame.draw.rect(screen, color, (BAR_X, y, bar_w, BAR_H))
+        pygame.draw.line(screen, (255, 255, 255), (BAR_X + int(BAR_W * 0.9), y), (BAR_X + int(BAR_W * 0.9), y + BAR_H), 3)  # 90% line
         unit = "N" if i < 3 else "N*m"
-        screen.blit(small.render(name, True, (220, 220, 220)), (16, y + 2))
-        screen.blit(small.render(f"{values[i]:.1f}{unit} ({pct:.0f}%)", True, (220, 220, 220)), (550, y + 2))
-        y += 30
+        screen.blit(small.render(name, True, (230, 230, 230)), (20, y + 4))
+        screen.blit(small.render(f"{values[i]:.1f}{unit} ({pct:.0f}%)", True, (230, 230, 230)), (BAR_X + BAR_W + 16, y + 4))
+        y += ROW_STEP
     return y
 
 
@@ -381,10 +407,10 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
         raise ImportError("pygame is required. Install it with: pip install pygame")
 
     pygame.init()
-    screen = pygame.display.set_mode((640, 940))
+    screen = pygame.display.set_mode((980, 1560))
     pygame.display.set_caption("FT Calibration Collector")
-    font = pygame.font.Font(None, 26)
-    small = pygame.font.Font(None, 20)
+    font = pygame.font.Font(None, 40)
+    small = pygame.font.Font(None, 30)
     clock = pygame.time.Clock()
     running = True
 
@@ -395,7 +421,8 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
-                elif event.key == pygame.K_SPACE:
+                elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                    # ENTER: "I'm done with this action" -- same as SPACE, back to resting.
                     log.set_label(LABEL_KEYS["space"])
                 elif event.key == pygame.K_n:
                     log.new_pose()
@@ -409,47 +436,58 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
                         log.set_label(LABEL_KEYS[key_name])
 
         screen.fill((25, 25, 30))
-        y = 16
-        screen.blit(font.render("FT Calibration Collector", True, (255, 255, 255)), (16, y))
-        y += 36
+        y = 20
+        screen.blit(font.render("FT Calibration Collector", True, (255, 255, 255)), (20, y))
+        y += 50
+
+        screen.blit(small.render(
+            "The arm does NOT move from this window -- put it in position-hold and push/twist the sensor by hand.",
+            True, (255, 190, 90),
+        ), (20, y))
+        y += 44
 
         label, session_type, pose_index = log.status
         status = f"[{label}]  session={session_type}  pose=#{pose_index}"
-        screen.blit(font.render(status, True, (120, 220, 255)), (16, y))
-        y += 36
+        screen.blit(font.render(status, True, (120, 220, 255)), (20, y))
+        y += 44
+        screen.blit(small.render(LABEL_INSTRUCTIONS.get(label, ""), True, (200, 200, 200)), (20, y))
+        y += 40
 
-        screen.blit(font.render("uFactory -- raw", True, (200, 200, 200)), (16, y))
-        y += 26
+        screen.blit(font.render("uFactory -- raw", True, (210, 210, 210)), (20, y))
+        y += 44
         y = _draw_bars(screen, small, y, ufactory.latest_raw)
 
-        y += 20
-        screen.blit(font.render("uFactory -- compensated (trusted reference)", True, (200, 200, 200)), (16, y))
         y += 26
+        screen.blit(font.render("uFactory -- compensated (trusted reference)", True, (210, 210, 210)), (20, y))
+        y += 44
         y = _draw_bars(screen, small, y, ufactory.latest_ext)
 
-        y += 20
-        screen.blit(font.render("Homemade -- calibrated (openft_module.py's matrix, not fully trusted yet)", True, (200, 200, 200)), (16, y))
         y += 26
+        screen.blit(font.render("Homemade -- calibrated (not fully trusted yet)", True, (210, 210, 210)), (20, y))
+        y += 44
         y = _draw_bars(screen, small, y, homemade.latest_cal)
 
-        y += 20
-        screen.blit(font.render("Homemade -- raw (16 channels, plain values, no assumed scale)", True, (200, 200, 200)), (16, y))
         y += 26
+        screen.blit(font.render("Homemade -- raw (16 channels, plain values, no assumed scale)", True, (210, 210, 210)), (20, y))
+        y += 44
         channels = homemade.latest_channels
-        for row in range(4):
-            for col in range(4):
-                idx = row * 4 + col
+        for row in range(6):
+            for col in range(3):
+                idx = row * 3 + col
+                if idx >= CHANNELS:
+                    continue
                 text = f"ch{idx + 1:>2}: {channels[idx]:9.1f}"
-                screen.blit(small.render(text, True, (200, 200, 200)), (16 + col * 155, y + row * 22))
-        y += 4 * 22 + 10
+                screen.blit(small.render(text, True, (210, 210, 210)), (20 + col * 300, y + row * 34))
+        y += 6 * 34 + 20
 
         legend = [
-            "W/S A/D Q/E : push +/-X +/-Y +/-Z    R/F T/G Y/H : twist +/-X +/-Y +/-Z",
-            "C: combined    SPACE: resting    N: new pose    1/2: session fast/slow    ESC: quit",
+            "W/S A/D Q/E : push +/-X +/-Y +/-Z      R/F T/G Y/H : twist +/-X +/-Y +/-Z",
+            "C: combined    SPACE or ENTER: done with this action, back to resting",
+            "N: new pose    1/2: session fast/slow    ESC: quit",
         ]
         for line in legend:
-            screen.blit(small.render(line, True, (150, 150, 150)), (16, y))
-            y += 22
+            screen.blit(small.render(line, True, (160, 160, 160)), (20, y))
+            y += 32
 
         pygame.display.flip()
         clock.tick(30)
