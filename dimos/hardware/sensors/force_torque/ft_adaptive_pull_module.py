@@ -239,9 +239,11 @@ class FTAdaptivePullModule(Module):
         # control loop -- a real overload transient can develop faster than one control tick,
         # so waiting for _run_phase's own cutoff check can be too late (this is what a real
         # error-53 fault on real hardware showed). Magnitude is rotation-invariant, no FK needed.
+        # 0.7x, not 0.8x: this path exists to catch what the slower reactive cutoff (0.75x
+        # on torque) might miss between ticks, so it must trip at least as early, not later.
         force_mag = float(np.linalg.norm(wrench[:3]))
         torque_mag = float(np.linalg.norm(wrench[3:]))
-        if force_mag > SENSOR_FORCE_OVERLOAD_N * 0.8 or torque_mag > SENSOR_TORQUE_OVERLOAD_NM * 0.8:
+        if force_mag > SENSOR_FORCE_OVERLOAD_N * 0.7 or torque_mag > SENSOR_TORQUE_OVERLOAD_NM * 0.7:
             if not self._stop_requested:
                 logger.warning(
                     "Fast-path overload trip: force=%.1fN torque=%.2fNm -- stopping immediately.",
