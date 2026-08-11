@@ -231,9 +231,25 @@ class FTAdaptivePullModule(Module):
         self._stop_requested = True
 
     def _on_wrench(self, msg: WrenchStamped) -> None:
+        wrench = np.array([msg.force.x, msg.force.y, msg.force.z, msg.torque.x, msg.torque.y, msg.torque.z])
         with self._lock:
-            self._latest_wrench = np.array(
-                [msg.force.x, msg.force.y, msg.force.z, msg.torque.x, msg.torque.y, msg.torque.z]
+            self._latest_wrench = wrench
+
+        # Fast-path hardware backstop: checked at sensor rate (up to 1000Hz), not the 25Hz
+        # control loop -- a real overload transient can develop faster than one control tick,
+        # so waiting for _run_phase's own cutoff check can be too late (this is what a real
+        # error-53 fault on real hardware showed). Magnitude is rotation-invariant, no FK needed.
+        force_mag = float(np.linalg.norm(wrench[:3]))
+        torque_mag = float(np.linalg.norm(wrench[3:]))
+        if force_mag > SENSOR_FORCE_OVERLOAD_N * 0.8 or torque_mag > SENSOR_TORQUE_OVERLOAD_NM * 0.8:
+            if not self._stop_requested:
+                logger.warning(
+                    "Fast-path overload trip: force=%.1fN torque=%.2fNm -- stopping immediately.",
+                    force_mag, torque_mag,
+                )
+            self._stop_requested = True
+            self.coordinator_ee_twist_command.publish(
+                TwistStamped(frame_id=self.config.task_name, linear=[0, 0, 0], angular=[0, 0, 0])
             )
 
     def _on_joint_state(self, msg: JointState) -> None:
