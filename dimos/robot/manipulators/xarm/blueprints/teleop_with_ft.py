@@ -128,20 +128,15 @@ keyboard_teleop_xarm7_ft_adaptive = autoconnect(
         joint_state_frame_id="coordinator",
         hardware=[_xarm7_hw],
         tasks=[
+            # Reverted a control_ik override here (joint_centering_cost/lm_damping) --
+            # this task is shared with manual WASD jogging, not just the automated
+            # pull, and the constant centering bias fought normal jog commands.
+            # Singularity handling now lives only in the module-level backstop
+            # (ft_adaptive_pull_module.py), which is active only during a pull.
             eef_twist_task(
                 _xarm7_hw,
                 robot_model=_xarm7_control_model,
                 timeout=0.0,
-                # Scoped to this blueprint only. joint_centering_cost was 0 (off) --
-                # biases the redundant joint toward mid-range every solve, keeping
-                # the arm off the singular configs that caused a real error-53 fault.
-                # lm_damping raised too; this task doesn't need precision tracking.
-                # Unverified starting values.
-                control_ik={
-                    "joint_centering_cost": 0.02,
-                    "lm_damping": 1e-2,
-                    "damping_cost": 0.01,
-                },
             ),
             TaskConfig(
                 name="servo_gripper",
