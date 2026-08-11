@@ -140,24 +140,26 @@ keyboard_teleop_xarm7_ft_adaptive = autoconnect(
             # arbitration WHILE actively pulling; EEFTwistTask.is_active() goes
             # False the instant it gets a zero twist, releasing the claim back to
             # teleop the moment a pull stops -- confirmed in eef_twist_task.py.
-            # Its own control_ik is safe to tune for singularity robustness since
-            # nothing else uses this task: root-caused from a real hardware fault
-            # (a joint snapped near a singularity, tripping the FT sensor's own
-            # overload protection, error 53). joint_centering_cost was 0 (off);
-            # it biases the redundant joint toward mid-range every solve.
-            # lm_damping raised too -- this task doesn't need precision tracking.
-            # Unverified starting values.
+            #
+            # max_velocity is a HARD per-joint cap: pink_control_ik.py applies
+            # velocity limits by uniformly scaling the whole solved joint-velocity
+            # vector, not clamping the QP itself -- so near a singularity, the
+            # worst joint gets scaled to exactly its rated max speed, not gently
+            # slowed (confirmed in _scale_velocity). Capping max_velocity well
+            # below any joint's rating bounds worst-case speed unconditionally,
+            # independent of Jacobian conditioning -- unlike joint_centering_cost/
+            # lm_damping (reverted -- those are soft QP costs, constant weights
+            # degrade tracking the whole time, not just near danger; that's what
+            # broke normal pull tracking last run). Root cause: real hardware
+            # fault (error 53, FT sensor overload) from a joint snapping near a
+            # singularity. Unverified starting value.
             eef_twist_task(
                 _xarm7_hw,
                 name="ft_pull_twist",
                 priority=15,
                 robot_model=_xarm7_control_model,
                 timeout=0.0,
-                control_ik={
-                    "joint_centering_cost": 0.02,
-                    "lm_damping": 1e-2,
-                    "damping_cost": 0.01,
-                },
+                control_ik={"max_velocity": 0.4},
             ),
             TaskConfig(
                 name="servo_gripper",
