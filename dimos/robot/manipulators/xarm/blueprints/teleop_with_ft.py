@@ -186,6 +186,9 @@ keyboard_teleop_xarm7_ft_adaptive = autoconnect(
         auto_run=False,
     ),
     WrenchPlotter.blueprint(),
+    # Same recording as keyboard_teleop_xarm7_ft, under its own filename so the
+    # two pull laws' runs stay separate and can be compared after the fact.
+    FTRecorder.blueprint(db_path="ft_teleop_adaptive_recording.db"),
 ).transports(_ft_transports)
 
 _xarm6_hw = xarm6_hardware("arm", gripper=True, mock_without_address=True)
