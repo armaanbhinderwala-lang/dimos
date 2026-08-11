@@ -34,6 +34,7 @@ from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
+from dimos.hardware.sensors.force_torque.ft_adaptive_pull_module import FTAdaptivePullModule
 from dimos.hardware.sensors.force_torque.ft_pull_module import FTPullModule
 from dimos.hardware.sensors.force_torque.read_FTModule import XArmFTSensor
 from dimos.manipulation.manipulation_module import ManipulationModule
@@ -97,6 +98,49 @@ keyboard_teleop_xarm7_ft = autoconnect(
     # there means its tip frame is "link7" (see xarm/config.py's tip_link logic),
     # not "link_tcp".
     FTPullModule.blueprint(
+        hardware_id="arm",
+        num_arm_joints=7,
+        model_path=_xarm7_control_model.model_path,
+        package_paths=_xarm7_control_model.package_paths,
+        xacro_args=_xarm7_control_model.xacro_args,
+        tool_frame_name="link7",
+        auto_run=False,
+    ),
+    WrenchPlotter.blueprint(),
+).transports(_ft_transports)
+
+# Same as keyboard_teleop_xarm7_ft, but FTAdaptivePullModule (general
+# admittance law -- see admittance_pull_law.py) in place of FTPullModule
+# (fixed Z-axis/pivot, microwave-only). Same ENTER-key handoff, same twist
+# channel, same everything else -- swap the module in to compare directly.
+keyboard_teleop_xarm7_ft_adaptive = autoconnect(
+    KeyboardTeleopModule.blueprint(),
+    ControlCoordinator.blueprint(
+        tick_rate=100.0,
+        publish_joint_state=True,
+        joint_state_frame_id="coordinator",
+        hardware=[_xarm7_hw],
+        tasks=[
+            eef_twist_task(
+                _xarm7_hw,
+                robot_model=_xarm7_control_model,
+                timeout=0.0,
+            ),
+            TaskConfig(
+                name="servo_gripper",
+                type="servo",
+                joint_names=_xarm7_hw.gripper_joints,
+                priority=20,
+                params={"timeout": 0.0, "default_positions": [0.0]},
+            ),
+        ],
+    ),
+    ManipulationModule.blueprint(
+        robots=[make_xarm7_model_config(add_gripper=True)],
+        visualization={"backend": "viser"},
+    ),
+    XArmFTSensor.blueprint(ip=global_config.xarm7_ip),
+    FTAdaptivePullModule.blueprint(
         hardware_id="arm",
         num_arm_joints=7,
         model_path=_xarm7_control_model.model_path,
