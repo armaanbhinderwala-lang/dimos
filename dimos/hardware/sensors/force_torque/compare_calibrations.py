@@ -59,6 +59,12 @@ UF_RATED = (150.0, 150.0, 200.0, 4.0, 4.0, 4.0)
 
 def load_matrix(path: Path) -> tuple[np.ndarray, np.ndarray]:
     """Read a calibration from either .npz (our baseline) or .json (driver format)."""
+    if not path.exists():
+        raise SystemExit(
+            f"\ncalibration file not found: {path.resolve()}\n\n"
+            "If this is the baseline, generate it first from the repo root:\n"
+            "    python3 dimos/hardware/sensors/force_torque/fit_calibration.py --data-dir .\n"
+        )
     if path.suffix == ".npz":
         d = np.load(path, allow_pickle=True)
         return np.asarray(d["A"], float), np.asarray(d["b"], float)
