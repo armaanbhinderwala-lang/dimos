@@ -34,6 +34,7 @@ from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.force_torque.openft_module import OpenFTSensor
 from dimos.memory2.module import Recorder, RecorderConfig
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
+from dimos.visualization.rerun.bridge import RerunBridgeModule
 from dimos.visualization.wrench_plotter import WrenchPlotter
 
 
@@ -75,7 +76,15 @@ openft = autoconnect(
     # defaults, so RecorderConfig._resolve_path only fires for an explicit
     # value. Without this the db lands relative to the worker's cwd.
     OpenFTRecorder.blueprint(db_path="openft_recording.db"),
-    WrenchPlotter.blueprint(),
+    # open_viewer=False because RerunBridgeModule below launches the viewer.
+    # Left on, both spawn one: two viewers race for the same port, and if the
+    # run dies they survive as orphans that make every later spawn a silent
+    # no-op (Rerun skips spawning when something already holds the port).
+    WrenchPlotter.blueprint(open_viewer=False),
+    # Owns the viewer launch. blueprint=None so it doesn't send a layout --
+    # Rerun keeps only the most recently sent one, and the plotter's wrench
+    # time-series layout is the one worth keeping.
+    RerunBridgeModule.blueprint(blueprint=None),
 ).transports(
     {
         ("ext_wrench", WrenchStamped): LCMTransport("/ft/ext_wrench", WrenchStamped),
