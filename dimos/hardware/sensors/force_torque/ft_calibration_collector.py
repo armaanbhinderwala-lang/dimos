@@ -253,7 +253,7 @@ class _LogWriter:
 
 
 class UFactoryReader:
-    def __init__(self, ip: str, log: ExperimentLog, rate_hz: float = 100.0):
+    def __init__(self, ip: str, log: ExperimentLog | None = None, rate_hz: float = 100.0):
         self.ip = ip
         self._log = log
         self._dt = 1.0 / rate_hz
@@ -279,13 +279,14 @@ class UFactoryReader:
         self._thread.start()
 
     def _loop(self) -> None:
-        writer = self._log.writer()
+        writer = self._log.writer() if self._log else None
         while self._running:
             raw = np.array(self._arm.ft_raw_force, dtype=float)
             ext = np.array(self._arm.ft_ext_force, dtype=float)
             self.latest_raw = raw
             self.latest_ext = ext
-            writer.log_ufactory(raw, ext)
+            if writer:
+                writer.log_ufactory(raw, ext)
             time.sleep(self._dt)
 
     def stop(self) -> None:
@@ -296,7 +297,8 @@ class UFactoryReader:
 
 
 class HomemadeReader:
-    def __init__(self, port: str, baud: int, log: ExperimentLog, calibration: Path | None, window: int = 3):
+    def __init__(self, port: str, baud: int, log: ExperimentLog | None = None,
+                 calibration: Path | None = None, window: int = 3):
         self.port = port
         self.baud = baud
         self._log = log
@@ -317,7 +319,7 @@ class HomemadeReader:
         self._thread.start()
 
     def _loop(self) -> None:
-        writer = self._log.writer()
+        writer = self._log.writer() if self._log else None
         while self._running:
             try:
                 line = self._serial.readline().decode("utf-8").strip()
@@ -332,7 +334,8 @@ class HomemadeReader:
             cal = self._matrix @ channels + self._bias if self._matrix is not None else np.zeros(6)
             self.latest_channels = channels
             self.latest_cal = cal
-            writer.log_homemade(channels, cal)
+            if writer:
+                writer.log_homemade(channels, cal)
 
     def stop(self) -> None:
         self._running = False

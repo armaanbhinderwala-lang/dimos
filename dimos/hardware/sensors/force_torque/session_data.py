@@ -145,6 +145,22 @@ def ufactory_to_diy_frame(wrench: np.ndarray) -> np.ndarray:
     return np.hstack([force @ R_DIY_FROM_UFACTORY.T, torque_at_diy @ R_DIY_FROM_UFACTORY.T])
 
 
+def diy_to_ufactory_frame(wrench: np.ndarray) -> np.ndarray:
+    """Inverse of ufactory_to_diy_frame: a DIY-frame wrench expressed at the uFactory origin.
+
+    Undo the two steps in reverse order -- rotate back into uFactory axes, then translate
+    the reference point back by +p (hence the sign flip against the forward transform).
+
+    Needed at deployment: the calibration predicts a wrench in the DIY frame, but anything
+    comparing it against the uFactory, or feeding a controller that expects the tool frame,
+    needs it moved back.
+    """
+    force, torque = wrench[:, :3], wrench[:, 3:]
+    force_u = force @ R_UFACTORY_FROM_DIY.T
+    torque_at_diy_u = torque @ R_UFACTORY_FROM_DIY.T
+    return np.hstack([force_u, torque_at_diy_u + np.cross(DIY_ORIGIN_IN_UFACTORY_M, force_u)])
+
+
 def moving_average(x: np.ndarray, window: int) -> np.ndarray:
     """Filter each column. ~1s of samples measurably improves the fit (see notebook)."""
     if window <= 1:
