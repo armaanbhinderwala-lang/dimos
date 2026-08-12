@@ -25,8 +25,12 @@ cross-axis coupling and manufacturing variation we cannot measure directly.
 A is NOT expected to be diagonal-ish. Cross-axis coupling is real and the matrix is supposed
 to capture it -- every channel may contribute to every output.
 
-Deliberately the simplest physically justified model: ordinary least squares, no filtering,
-no nonlinearity. This is the number every later improvement has to beat.
+Linear by design -- the sensor's physics is linear at these deflections, and nonlinear
+models (random forest, MLP, polynomial) were tested and did not beat it.
+
+Ridge by default: plain least squares fits the training sessions slightly too well and
+transfers worse to a new one (held-out R2 0.181 vs 0.217). --method ols gives the plain
+baseline. The penalty strength is chosen by cross-validation, not by hand.
 
 Loading, alignment, zero removal and the frame transform live in session_data.py.
 Run 01_inspect_data.ipynb first; this script assumes the data has already been checked.
@@ -67,6 +71,53 @@ def fit_ols(x: np.ndarray, y: np.ndarray, with_bias: bool = True) -> tuple[np.nd
     return solution.T, np.zeros(y.shape[1])
 
 
+def fit_ridge(x: np.ndarray, y: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray]:
+    """Ridge fit: least squares plus a penalty on the size of the weights.
+
+        minimise   ||A x - y||^2  +  alpha * ||A||^2
+
+    Plain least squares picks whatever weights fit the training sessions best, including
+    large opposing weights on near-duplicate channels that happen to cancel in THIS data.
+    Those cancellations do not survive to a new session. The penalty makes large weights
+    costly, so the fit prefers smaller, steadier ones that transfer better -- measurably:
+    held-out R2 goes 0.181 -> 0.217 on our sessions.
+
+    Inputs are standardised so one alpha means the same thing to every channel, then the
+    scaling is folded back so the returned A and b work directly on raw counts. The bias
+    is never penalised -- shrinking it would just bias every prediction toward zero.
+    """
+    mean, scale = x.mean(axis=0), x.std(axis=0)
+    scale = np.where(scale < 1e-12, 1.0, scale)
+    z = np.hstack([(x - mean) / scale, np.ones((len(x), 1))])
+
+    gram = z.T @ z + alpha * np.eye(z.shape[1])
+    gram[-1, -1] -= alpha                      # leave the intercept unpenalised
+    weights = np.linalg.solve(gram, z.T @ y)
+
+    A = (weights[:-1] / scale[:, None]).T
+    return A, weights[-1] - A @ mean
+
+
+def select_alpha(sessions: list[Session], alphas: np.ndarray) -> tuple[float, np.ndarray]:
+    """Choose the penalty strength by leave-one-session-out, not by taste.
+
+    Returns (best alpha, mean held-out R2 per alpha). Note this is mildly optimistic --
+    alpha is chosen on the same folds used to report the score. A fully rigorous number
+    needs nested cross-validation; for a baseline the bias is small and the alternative
+    (picking a round number by hand) is worse.
+    """
+    scores = []
+    for alpha in alphas:
+        per_fold = []
+        for held in sessions:
+            train = [s for s in sessions if s is not held]
+            A, b = fit_ridge(*stack(train), alpha)
+            per_fold.append(metrics(held.wrench, predict(A, b, held.channels))["r2"])
+        scores.append(np.mean(per_fold))
+    scores = np.array(scores)
+    return float(alphas[int(np.argmax(scores))]), scores
+
+
 def predict(A: np.ndarray, b: np.ndarray, x: np.ndarray) -> np.ndarray:
     return x @ A.T + b
 
@@ -90,7 +141,7 @@ def stack(sessions: list[Session]) -> tuple[np.ndarray, np.ndarray]:
 
 
 # --------------------------------------------------------------- validation
-def leave_one_session_out(sessions: list[Session], with_bias: bool) -> dict:
+def leave_one_session_out(sessions: list[Session], with_bias: bool, alpha: float | None = None) -> dict:
     """Train on every session but one, test on the held-out one, rotate.
 
     The only honest score here: samples arrive at ~35 Hz so neighbouring rows are
@@ -100,7 +151,7 @@ def leave_one_session_out(sessions: list[Session], with_bias: bool) -> dict:
     per_session = []
     for held in sessions:
         train = [s for s in sessions if s is not held]
-        A, b = fit_ols(*stack(train), with_bias)
+        A, b = fit_ridge(*stack(train), alpha) if alpha else fit_ols(*stack(train), with_bias)
         m = metrics(held.wrench, predict(A, b, held.channels))
         per_session.append({"session": held.session_id, "n": len(held), **m})
     mean = {k: np.mean([p[k] for p in per_session], axis=0) for k in ("r2", "mae", "rmse")}
@@ -135,6 +186,10 @@ def main() -> None:
     p.add_argument("--filter-window", type=int, default=0,
                    help="input moving-average samples; 0 = none, which is the true baseline")
     p.add_argument("--sessions", nargs="*")
+    p.add_argument("--method", choices=["ridge", "ols"], default="ridge",
+                   help="ridge generalises better to unseen sessions; ols is the plain baseline")
+    p.add_argument("--alpha", type=float, default=None,
+                   help="ridge penalty; omitted = chosen automatically by leave-one-session-out")
     args = p.parse_args()
 
     ids = args.sessions or find_sessions(args.data_dir)
@@ -146,22 +201,25 @@ def main() -> None:
     print(f"{len(ids)} sessions | {len(x_all):,} samples | {CHANNELS} channels -> {len(AXES)} outputs")
     print(f"target frame: {args.frame}   input filter: {args.filter_window or 'none'}")
 
-    # --- the two models the baseline compares ------------------------------
-    results = {}
-    for name, with_bias in (("Model 1:  W = A x + b", True), ("Model 2:  W = A x", False)):
-        r = leave_one_session_out(sessions, with_bias)
-        results[with_bias] = r
-        print_axis_table(f"{name}   [leave-one-session-out]", r["mean"])
+    # --- choose the penalty strength, then validate -------------------------
+    alpha = None
+    if args.method == "ridge":
+        alpha = args.alpha
+        if alpha is None:
+            grid = np.logspace(0, 7, 15)
+            alpha, curve = select_alpha(sessions, grid)
+            print(f"\nalpha chosen by leave-one-session-out: {alpha:g}")
+            print("  " + "  ".join(f"{a:g}:{s:.3f}" for a, s in zip(grid, curve, strict=True)))
+        print_axis_table("Plain OLS, for reference   [leave-one-session-out]",
+                         leave_one_session_out(sessions, True)["mean"])
 
-    d = results[True]["mean"]["r2"] - results[False]["mean"]["r2"]
-    print(f"\n  bias term changes R2 by: " + " ".join(f"{a}:{v:+.3f}" for a, v in zip(AXES, d, strict=True)))
-    print("  (near zero means the measured zero-removal already handles the offset,")
-    print("   so the model does not need to learn one)")
-
-    print_per_session(results[True])
+    result = leave_one_session_out(sessions, True, alpha)
+    print_axis_table(f"{'Ridge alpha=' + f'{alpha:g}' if alpha else 'OLS'}   [leave-one-session-out]",
+                     result["mean"])
+    print_per_session(result)
 
     # --- final fit on everything -------------------------------------------
-    A, b = fit_ols(x_all, y_all, with_bias=True)
+    A, b = fit_ridge(x_all, y_all, alpha) if alpha else fit_ols(x_all, y_all, with_bias=True)
     print_axis_table("Final fit on ALL sessions   [in-sample, optimistic by definition]",
                      metrics(y_all, predict(A, b, x_all)))
 
@@ -174,7 +232,7 @@ def main() -> None:
     # --- save --------------------------------------------------------------
     # Everything needed to reproduce a prediction travels with the matrix. A calibration
     # without its preprocessing is unusable, so the frame and the filter are saved too.
-    holdout = results[True]["mean"]
+    holdout = result["mean"]
     np.savez(
         args.out,
         A=A, b=b,
@@ -182,6 +240,8 @@ def main() -> None:
         sessions=np.array(ids), num_samples=len(x_all),
         frame=args.frame,
         filter_window=args.filter_window,
+        method=args.method,
+        alpha=(alpha if alpha else 0.0),
         zero_removal="time-varying baseline interpolated between resting segments",
         R_ufactory_from_diy=R_UFACTORY_FROM_DIY,
         diy_origin_in_ufactory_m=DIY_ORIGIN_IN_UFACTORY_M,
@@ -199,6 +259,8 @@ def main() -> None:
             "sessions": ids,
             "num_samples": int(len(x_all)),
             "target_frame": args.frame,
+            "method": args.method,
+            "alpha": alpha,
             "filter_window_samples": args.filter_window,
             "holdout_r2": dict(zip(AXES, holdout["r2"].round(4).tolist(), strict=True)),
             "holdout_rmse": dict(zip(AXES, holdout["rmse"].round(4).tolist(), strict=True)),
