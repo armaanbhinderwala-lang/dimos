@@ -47,11 +47,29 @@ UF_RATED = {"fx": 150.0, "fy": 150.0, "fz": 200.0, "mx": 4.0, "my": 4.0, "mz": 4
 # openFT firmware treats channel readings outside this band as invalid.
 OPENFT_VALID = (9000.0, 21000.0)
 
-# Distance between the two sensors' origins along the tool axis, from CAD:
-# uFactory mounting flange -> its sensor origin is 49.2 mm; DIY CNC backplate -> its
-# sensor origin is 7.25 mm, on the far side. Independently, sweeping the data for the
-# offset that best decouples force from torque lands at 52-55 mm (see the notebook).
-SENSOR_ORIGIN_OFFSET_M = 0.05645
+# ---------------------------------------------------------------------------
+# Geometry between the two sensors. Both quantities were established three ways
+# (physical measurement, CAD, and fitting the data) -- see notebook steps 10 and 12.
+# ---------------------------------------------------------------------------
+
+# Position of the DIY sensor's origin relative to the uFactory's, expressed in
+# uFACTORY coordinates. Physically measured at 63.3 mm; CAD (49.2 + 7.25) gives
+# 56.5 mm and a data sweep prefers 52.5 mm. They differ because the PCB faces and
+# the sensors' internal measurement origins are not the same points; any value in
+# this range removes ~85% of the force/torque coupling.
+DIY_ORIGIN_IN_UFACTORY_M = np.array([0.0, 0.0, 0.0633])
+SENSOR_ORIGIN_OFFSET_M = float(DIY_ORIGIN_IN_UFACTORY_M[2])  # kept for callers that want the scalar
+
+# Rotation taking a vector FROM the DIY frame TO the uFactory frame: v_U = R @ v_D.
+# A rotation matrix's columns are the images of the source frame's basis vectors, so
+# this encodes the measured mapping  DIY +X -> uF -Y,  DIY +Y -> uF +X,  DIY +Z -> uF +Z
+# (a -90 deg rotation about Z). Confirmed physically and by two independent fits.
+R_UFACTORY_FROM_DIY = np.array([
+    [0.0, 1.0, 0.0],
+    [-1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0],
+])
+R_DIY_FROM_UFACTORY = R_UFACTORY_FROM_DIY.T  # inverse of a rotation is its transpose
 
 
 def read_csv(path: Path | str) -> list[dict[str, str]]:
@@ -88,15 +106,16 @@ def timestamps(rows: list[dict[str, str]]) -> np.ndarray:
 
 
 def shift_wrench_frame(y: np.ndarray, offset_m: float) -> np.ndarray:
-    """Re-express a wrench about a point `offset_m` further along +Z.
+    """Move a wrench's reference POINT by `offset_m` along +Z, without rotating it.
 
-    Standard transform M' = M - r x F with r = (0, 0, d), which reduces to
+    Moment about a new point B, given the moment about A:  tau_B = tau_A - p x F,
+    where p is the vector from A to B. With p = (0, 0, d) this reduces to
         mx' = mx + d*fy,   my' = my - d*fx,   mz' unchanged.
-    Force is unchanged by a pure translation of the reference point.
+    Force is a free vector and so is unaffected by a pure translation.
 
-    Use this to express the uFactory's wrench about the HOMEMADE sensor's origin --
-    the physically honest target, since that is the wrench the homemade sensor
-    actually experiences.
+    This is the translation half of the transform only; use ufactory_to_diy_frame for
+    the full change of frame. Kept separate because the notebook sweeps `offset_m` to
+    estimate the sensor separation, which needs translation without rotation.
     """
     if not offset_m:
         return y
@@ -104,6 +123,26 @@ def shift_wrench_frame(y: np.ndarray, offset_m: float) -> np.ndarray:
     out[:, 3] = y[:, 3] + offset_m * y[:, 1]
     out[:, 4] = y[:, 4] - offset_m * y[:, 0]
     return out
+
+
+def ufactory_to_diy_frame(wrench: np.ndarray) -> np.ndarray:
+    """Express a uFactory wrench about the DIY sensor's origin, in DIY axes.
+
+    Two steps, and the order matters in general:
+      1. TRANSLATE, still in uFactory axes -- tau_at_D = tau_U - p x F_U
+      2. ROTATE both force and torque into DIY axes with R_DIY_FROM_UFACTORY
+
+    Doing it the other way round is also valid provided `p` is first rotated into DIY
+    axes too. Here p lies along Z and the rotation is about Z, so p is identical in both
+    frames and the two orders coincide -- but only by coincidence of this geometry, so
+    the explicit order above is the one to rely on.
+
+    A common mistake is `tau - p x F_D`, mixing a uFactory-frame p with a DIY-frame F.
+    A cross product between vectors in different frames is not defined.
+    """
+    force, torque = wrench[:, :3], wrench[:, 3:]
+    torque_at_diy = torque - np.cross(DIY_ORIGIN_IN_UFACTORY_M, force)
+    return np.hstack([force @ R_DIY_FROM_UFACTORY.T, torque_at_diy @ R_DIY_FROM_UFACTORY.T])
 
 
 def moving_average(x: np.ndarray, window: int) -> np.ndarray:
@@ -149,7 +188,7 @@ class Session:
 def load_session(
     session: str,
     data_dir: Path | str = ".",
-    frame_offset_m: float = 0.0,
+    frame: str = "ufactory",
     filter_window: int = 0,
 ) -> Session:
     """Load one session: align the two sensors, then remove a time-varying baseline.
@@ -162,10 +201,17 @@ def load_session(
     points are taken from each and interpolated between, because the sensor's zero drifts
     measurably more than the load signal itself over a run.
 
-    frame_offset_m: see shift_wrench_frame. 0.0 keeps the reference's own frame
-    (a drop-in replacement that reports what the uFactory reports); SENSOR_ORIGIN_OFFSET_M
-    targets the wrench about the homemade sensor's own origin.
+    frame:
+      "ufactory" -- leave the reference wrench as measured. The calibration then reports
+                    what the uFactory would report: a true drop-in replacement, but the
+                    fit can absorb the fixed p x F term instead of learning real torque.
+      "diy"      -- express the wrench about the DIY sensor's own origin and axes. The
+                    physically honest target, and the one that transfers to loads applied
+                    somewhere other than where the training loads were.
     """
+    if frame not in ("ufactory", "diy"):
+        raise ValueError(f"frame must be 'ufactory' or 'diy', got {frame!r}")
+
     uf = stream(session, "ufactory_calibrated", data_dir)
     hm = stream(session, "homemade_raw", data_dir)
 
@@ -175,7 +221,8 @@ def load_session(
     segment_start = np.array([float(r["experiment_start_ts"]) for r in hm])
 
     wrench = np.column_stack([np.interp(times, uf_times, uf_wrench[:, i]) for i in range(len(AXES))])
-    wrench = shift_wrench_frame(wrench, frame_offset_m)
+    if frame == "diy":
+        wrench = ufactory_to_diy_frame(wrench)
     raw_wrench = wrench.copy()
 
     resting = labels == "resting"
@@ -205,8 +252,8 @@ def load_session(
 def load_all(
     data_dir: Path | str = ".",
     sessions: list[str] | None = None,
-    frame_offset_m: float = 0.0,
+    frame: str = "ufactory",
     filter_window: int = 0,
 ) -> list[Session]:
     ids = sessions or find_sessions(data_dir)
-    return [load_session(s, data_dir, frame_offset_m, filter_window) for s in ids]
+    return [load_session(s, data_dir, frame, filter_window) for s in ids]
