@@ -12,209 +12,206 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fit a 6x16 calibration matrix for the homemade FT sensor from collector sessions.
+"""Baseline calibration: fit W = A x + b mapping DIY sensor channels to a physical wrench.
 
-Trains homemade raw channels -> uFactory wrench (the trusted reference), and writes
-an ft_calibration.json that drops straight into openft_module.py.
+    x  in R^16   raw Hall channels, ADC counts, zero already removed
+    W  in R^6    wrench (Fx Fy Fz Mx My Mz) expressed in the DIY sensor's own frame
+    A  in R^6x16 calibration matrix        b in R^6  bias
 
-Three preprocessing steps carry most of the accuracy, all validated on real sessions:
+Physically this is the inverse of the sensor's own sensitivity: if x = S*W, then W = S^-1 x,
+so A estimates S^-1. We learn it rather than derive it because S depends on magnet placement,
+cross-axis coupling and manufacturing variation we cannot measure directly.
 
-  1. Time-varying baseline. The collector records a `resting` segment every couple of
-     minutes; baselines are interpolated between them and subtracted from BOTH sensors.
-     This cancels thermal drift, which measurably exceeds the load signal itself between
-     sessions. Measured: torque R2 0.37 -> 0.50 vs a single constant per session.
-  2. Moving-average filter on the sensor input (~1s). Measured: mean R2 0.33 -> 0.40.
-     Evaluated honestly -- input filtered, unsmoothed wrench predicted.
-  3. Ridge, not plain least-squares. The 16 channels come from 4 physical magnet
-     clusters and are strongly collinear; unregularized lstsq is what produced the
-     all-zero Mz row in the original shipped calibration.
+A is NOT expected to be diagonal-ish. Cross-axis coupling is real and the matrix is supposed
+to capture it -- every channel may contribute to every output.
 
-Model choice is empirical, not assumed: Ridge beat Poly2+Ridge, RandomForest and an
-MLP under held-out-session CV on this data. Nonlinear models tie or overfit, which
-says the bottleneck is sensor SNR, not model capacity.
+Deliberately the simplest physically justified model: ordinary least squares, no filtering,
+no nonlinearity. This is the number every later improvement has to beat.
 
-Validation is ALWAYS held-out-session (leave-one-session-out). A random train/test
-split leaks badly here -- samples arrive at ~35Hz and neighbours are near-duplicates.
+Loading, alignment, zero removal and the frame transform live in session_data.py.
+Run 01_inspect_data.ipynb first; this script assumes the data has already been checked.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import glob
 import json
-import re
 import time
 from pathlib import Path
 
 import numpy as np
 
-AXES = ("fx", "fy", "fz", "mx", "my", "mz")
-CHANNELS = 16
-CHAN_COLS = tuple(f"ch{i}" for i in range(1, CHANNELS + 1))
-
-# UFACTORY 6-axis FT sensor rated range; samples beyond this are outside the REFERENCE
-# sensor's spec, so their labels are untrustworthy regardless of the homemade sensor.
-REF_FORCE_LIMIT_N = 150.0
-REF_TORQUE_LIMIT_NM = 4.0
-
-
-def _read(path: Path) -> list[dict[str, str]]:
-    with path.open() as fh:
-        return list(csv.DictReader(fh))
+from session_data import (
+    AXES,
+    CHANNELS,
+    DIY_ORIGIN_IN_UFACTORY_M,
+    R_UFACTORY_FROM_DIY,
+    Session,
+    find_sessions,
+    load_all,
+)
 
 
-def find_sessions(directory: Path) -> list[str]:
-    pat = str(directory / "ft_calibration_session_*_run_metadata.csv")
-    return sorted(re.search(r"session_(\d+)_run_metadata", p).group(1) for p in glob.glob(pat))
+# --------------------------------------------------------------------------- fit
+def fit_ols(x: np.ndarray, y: np.ndarray, with_bias: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Least squares fit of y = A x + b. Returns (A [6xN], b [6]).
+
+    Solved with lstsq (which uses the pseudoinverse internally) rather than forming
+    (X^T X)^-1 explicitly -- the normal equations square the condition number and lose
+    precision when channels are near-duplicates, which they are here.
+    """
+    design = np.hstack([x, np.ones((len(x), 1))]) if with_bias else x
+    solution, *_ = np.linalg.lstsq(design, y, rcond=None)   # (N+1, 6) or (N, 6)
+    if with_bias:
+        return solution[:-1].T, solution[-1]
+    return solution.T, np.zeros(y.shape[1])
 
 
-def load_session(directory: Path, session: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Returns (X, y, y_absolute): baseline-corrected channels, baseline-corrected wrench,
-    and the raw uncorrected wrench (used only for out-of-spec filtering)."""
-    uf = _read(directory / f"ft_calibration_session_{session}_ufactory_calibrated.csv")
-    hm = _read(directory / f"ft_calibration_session_{session}_homemade_raw.csv")
-
-    uf_ts = np.array([float(r["ts"]) for r in uf])
-    uf_y = np.array([[float(r[a]) for a in AXES] for r in uf])
-    hm_ts = np.array([float(r["ts"]) for r in hm])
-    X = np.array([[float(r[c]) for c in CHAN_COLS] for r in hm])
-    labels = np.array([r["label"] for r in hm])
-    seg_start = np.array([float(r["experiment_start_ts"]) for r in hm])
-
-    # Interpolate the FASTER uFactory stream (~89Hz) onto the SLOWER homemade
-    # timestamps (~35Hz) -- never upsample the target. A +/-0.5s lag sweep on real
-    # data peaks at exactly 0.00s, so the collector's timestamps need no correction.
-    y = np.column_stack([np.interp(hm_ts, uf_ts, uf_y[:, i]) for i in range(len(AXES))])
-
-    rest = labels == "resting"
-    if rest.sum() < 10:
-        raise ValueError(f"session {session}: only {rest.sum()} resting samples, need >=10")
-
-    segments: dict[float, list[int]] = {}
-    for i in np.where(rest)[0]:
-        segments.setdefault(seg_start[i], []).append(i)
-    keys = sorted(segments)
-    centres = np.array([hm_ts[segments[k]].mean() for k in keys])
-    base_x = np.array([X[segments[k]].mean(axis=0) for k in keys])
-    base_y = np.array([y[segments[k]].mean(axis=0) for k in keys])
-
-    Xb = np.column_stack([np.interp(hm_ts, centres, base_x[:, j]) for j in range(CHANNELS)])
-    yb = np.column_stack([np.interp(hm_ts, centres, base_y[:, j]) for j in range(len(AXES))])
-    return X - Xb, y - yb, y
+def predict(A: np.ndarray, b: np.ndarray, x: np.ndarray) -> np.ndarray:
+    return x @ A.T + b
 
 
-def moving_average(X: np.ndarray, window: int) -> np.ndarray:
-    if window <= 1:
-        return X
-    kernel = np.ones(window) / window
-    return np.column_stack([np.convolve(X[:, j], kernel, mode="same") for j in range(X.shape[1])])
+def metrics(truth: np.ndarray, pred: np.ndarray) -> dict[str, np.ndarray]:
+    """Per-axis R2, MAE and RMSE.
+
+    R2 = 1 - var(error)/var(truth):  1.0 perfect, 0.0 no better than guessing the mean,
+    negative worse than guessing the mean.
+    """
+    err = truth - pred
+    return {
+        "r2": 1 - err.var(axis=0) / np.maximum(truth.var(axis=0), 1e-12),
+        "mae": np.abs(err).mean(axis=0),
+        "rmse": np.sqrt((err**2).mean(axis=0)),
+    }
 
 
-def in_spec(y_absolute: np.ndarray) -> np.ndarray:
-    return (np.linalg.norm(y_absolute[:, :3], axis=1) <= REF_FORCE_LIMIT_N) & (
-        np.linalg.norm(y_absolute[:, 3:], axis=1) <= REF_TORQUE_LIMIT_NM
-    )
+def stack(sessions: list[Session]) -> tuple[np.ndarray, np.ndarray]:
+    return np.vstack([s.channels for s in sessions]), np.vstack([s.wrench for s in sessions])
 
 
-def ridge_fit(X: np.ndarray, y: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray]:
-    """Standardised ridge, returned in RAW channel units as (6x16 matrix, 6 bias) so the
-    output is directly usable without shipping the scaler alongside it."""
-    mu, sigma = X.mean(axis=0), X.std(axis=0)
-    sigma = np.where(sigma < 1e-12, 1.0, sigma)
-    Z = (X - mu) / sigma
-    Za = np.hstack([Z, np.ones((len(Z), 1))])
-    A = Za.T @ Za + alpha * np.eye(Za.shape[1])
-    A[-1, -1] -= alpha  # never penalise the intercept
-    W = np.linalg.solve(A, Za.T @ y)  # (17, 6)
+# --------------------------------------------------------------- validation
+def leave_one_session_out(sessions: list[Session], with_bias: bool) -> dict:
+    """Train on every session but one, test on the held-out one, rotate.
 
-    matrix = (W[:CHANNELS] / sigma[:, None]).T  # (6, 16), raw units
-    bias = W[CHANNELS] - matrix @ mu
-    return matrix, bias
-
-
-def evaluate(matrix, bias, X, y) -> tuple[np.ndarray, np.ndarray]:
-    resid = y - (X @ matrix.T + bias)
-    r2 = 1 - resid.var(axis=0) / np.maximum(y.var(axis=0), 1e-12)
-    return r2, np.sqrt((resid**2).mean(axis=0))
+    The only honest score here: samples arrive at ~35 Hz so neighbouring rows are
+    near-duplicates, and a random split would put near-copies of the test data into
+    training. This measures whether the calibration transfers to a NEW physical session.
+    """
+    per_session = []
+    for held in sessions:
+        train = [s for s in sessions if s is not held]
+        A, b = fit_ols(*stack(train), with_bias)
+        m = metrics(held.wrench, predict(A, b, held.channels))
+        per_session.append({"session": held.session_id, "n": len(held), **m})
+    mean = {k: np.mean([p[k] for p in per_session], axis=0) for k in ("r2", "mae", "rmse")}
+    return {"per_session": per_session, "mean": mean}
 
 
+# --------------------------------------------------------------- reporting
+def print_axis_table(title: str, m: dict[str, np.ndarray]) -> None:
+    print(f"\n{title}")
+    print(f"  {'axis':<5} {'R2':>8} {'MAE':>10} {'RMSE':>10}   unit")
+    for i, a in enumerate(AXES):
+        unit = "N" if i < 3 else "N*m"
+        print(f"  {a:<5} {m['r2'][i]:8.3f} {m['mae'][i]:10.3f} {m['rmse'][i]:10.3f}   {unit}")
+
+
+def print_per_session(result: dict) -> None:
+    print(f"\n  per-session held-out R2")
+    print(f"  {'session':>12} {'n':>7}  " + "".join(f"{a:>7}" for a in AXES))
+    for p in result["per_session"]:
+        print(f"  {p['session']:>12} {p['n']:7d}  " + "".join(f"{v:7.2f}" for v in p["r2"]))
+
+
+# --------------------------------------------------------------- entry point
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data-dir", type=Path, default=Path("."), help="directory holding the session CSVs")
-    p.add_argument("--out", type=Path, default=Path("ft_calibration_fitted.json"))
-    p.add_argument("--alpha", type=float, default=1000.0, help="ridge regularisation (default tuned on 10 sessions)")
-    p.add_argument("--filter-window", type=int, default=35, help="input moving-average samples (~35 = 1s at 35Hz)")
-    p.add_argument("--no-spec-filter", action="store_true", help="keep samples beyond the reference sensor's rated range")
-    p.add_argument("--sessions", nargs="*", help="explicit session ids (default: all found)")
+    p.add_argument("--data-dir", type=Path, default=Path("."))
+    p.add_argument("--out", type=Path, default=Path("calibration_baseline.npz"))
+    p.add_argument("--json-out", type=Path, default=Path("ft_calibration_baseline.json"),
+                   help="same matrix in the format openft_module.py already reads")
+    p.add_argument("--frame", choices=["diy", "ufactory"], default="diy",
+                   help="frame the target wrench is expressed in (default: the DIY sensor's own)")
+    p.add_argument("--filter-window", type=int, default=0,
+                   help="input moving-average samples; 0 = none, which is the true baseline")
+    p.add_argument("--sessions", nargs="*")
     args = p.parse_args()
 
-    sessions = args.sessions or find_sessions(args.data_dir)
-    if len(sessions) < 2:
-        raise SystemExit(f"need >=2 sessions for held-out-session validation, found {len(sessions)}")
-    print(f"Found {len(sessions)} sessions in {args.data_dir}")
+    ids = args.sessions or find_sessions(args.data_dir)
+    if len(ids) < 2:
+        raise SystemExit(f"need >= 2 sessions for leave-one-session-out, found {len(ids)}")
 
-    data = {}
-    for s in sessions:
-        Xc, yc, y_abs = load_session(args.data_dir, s)
-        keep = np.ones(len(Xc), bool) if args.no_spec_filter else in_spec(y_abs)
-        data[s] = (moving_average(Xc, args.filter_window)[keep], yc[keep])
-        dropped = len(Xc) - keep.sum()
-        print(f"  {s}: {keep.sum():6d} samples" + (f"  ({dropped} dropped as out-of-spec)" if dropped else ""))
+    sessions = load_all(args.data_dir, ids, frame=args.frame, filter_window=args.filter_window)
+    x_all, y_all = stack(sessions)
+    print(f"{len(ids)} sessions | {len(x_all):,} samples | {CHANNELS} channels -> {len(AXES)} outputs")
+    print(f"target frame: {args.frame}   input filter: {args.filter_window or 'none'}")
 
-    print(f"\n=== Leave-one-session-out validation (alpha={args.alpha}, filter={args.filter_window}) ===")
-    print(f"{'held-out':>14}" + "".join(f"{a:>8}" for a in AXES))
-    all_r2 = []
-    for held in sessions:
-        Xtr = np.vstack([data[s][0] for s in sessions if s != held])
-        ytr = np.vstack([data[s][1] for s in sessions if s != held])
-        m, b = ridge_fit(Xtr, ytr, args.alpha)
-        r2, _ = evaluate(m, b, *data[held])
-        all_r2.append(r2)
-        print(f"{held:>14}" + "".join(f"{v:8.2f}" for v in r2))
-    mean_r2 = np.mean(all_r2, axis=0)
-    print(f"{'MEAN R2':>14}" + "".join(f"{v:8.2f}" for v in mean_r2) + f"   overall {mean_r2.mean():.2f}")
+    # --- the two models the baseline compares ------------------------------
+    results = {}
+    for name, with_bias in (("Model 1:  W = A x + b", True), ("Model 2:  W = A x", False)):
+        r = leave_one_session_out(sessions, with_bias)
+        results[with_bias] = r
+        print_axis_table(f"{name}   [leave-one-session-out]", r["mean"])
 
-    X = np.vstack([data[s][0] for s in sessions])
-    y = np.vstack([data[s][1] for s in sessions])
-    matrix, bias = ridge_fit(X, y, args.alpha)
-    r2_in, rmse_in = evaluate(matrix, bias, X, y)
-    print(f"\n=== Final fit on all {len(sessions)} sessions ({len(X)} samples) ===")
-    print(f"{'':>14}" + "".join(f"{a:>8}" for a in AXES))
-    print(f"{'in-sample R2':>14}" + "".join(f"{v:8.2f}" for v in r2_in))
-    print(f"{'RMSE':>14}" + "".join(f"{v:8.2f}" for v in rmse_in) + "   (N / N*m)")
+    d = results[True]["mean"]["r2"] - results[False]["mean"]["r2"]
+    print(f"\n  bias term changes R2 by: " + " ".join(f"{a}:{v:+.3f}" for a, v in zip(AXES, d, strict=True)))
+    print("  (near zero means the measured zero-removal already handles the offset,")
+    print("   so the model does not need to learn one)")
 
-    # A vanishing row means that axis outputs a constant no matter what the sensor does --
-    # the exact failure mode in the originally shipped calibration.
-    norms = np.linalg.norm(matrix, axis=1)
+    print_per_session(results[True])
+
+    # --- final fit on everything -------------------------------------------
+    A, b = fit_ols(x_all, y_all, with_bias=True)
+    print_axis_table("Final fit on ALL sessions   [in-sample, optimistic by definition]",
+                     metrics(y_all, predict(A, b, x_all)))
+
+    print(f"\n  bias magnitude |b| = {np.abs(b).max():.4f} (max element)")
+    norms = np.linalg.norm(A, axis=1)
     dead = [AXES[i] for i in range(len(AXES)) if norms[i] <= 1e-12 * norms.max()]
     if dead:
-        print(f"\nWARNING: degenerate (all-zero) row(s) for {', '.join(dead)} -- that axis will read a constant.")
+        print(f"  WARNING: all-zero row(s) for {', '.join(dead)} -- that axis reads a constant.")
 
-    args.out.write_text(json.dumps({
-        "calibration_matrix": matrix.tolist(),
-        "bias_vector": bias.tolist(),
+    # --- save --------------------------------------------------------------
+    # Everything needed to reproduce a prediction travels with the matrix. A calibration
+    # without its preprocessing is unusable, so the frame and the filter are saved too.
+    holdout = results[True]["mean"]
+    np.savez(
+        args.out,
+        A=A, b=b,
+        channels=CHANNELS, axes=np.array(AXES),
+        sessions=np.array(ids), num_samples=len(x_all),
+        frame=args.frame,
+        filter_window=args.filter_window,
+        zero_removal="time-varying baseline interpolated between resting segments",
+        R_ufactory_from_diy=R_UFACTORY_FROM_DIY,
+        diy_origin_in_ufactory_m=DIY_ORIGIN_IN_UFACTORY_M,
+        holdout_r2=holdout["r2"], holdout_mae=holdout["mae"], holdout_rmse=holdout["rmse"],
+    )
+
+    args.json_out.write_text(json.dumps({
+        "calibration_matrix": A.tolist(),
+        "bias_vector": b.tolist(),
         "sensor_channels": CHANNELS,
         "output_channels": len(AXES),
         "timestamp": time.time(),
         "metadata": {
-            "fit_by": "fit_calibration.py",
-            "sessions": sessions,
-            "num_samples": int(len(X)),
-            "alpha": args.alpha,
+            "fit_by": "fit_calibration.py (OLS baseline)",
+            "sessions": ids,
+            "num_samples": int(len(x_all)),
+            "target_frame": args.frame,
             "filter_window_samples": args.filter_window,
-            "spec_filtered": not args.no_spec_filter,
-            "holdout_mean_r2": {a: float(mean_r2[i]) for i, a in enumerate(AXES)},
-            "in_sample_rmse": {a: float(rmse_in[i]) for i, a in enumerate(AXES)},
-            "note": (
-                "Apply the SAME preprocessing at inference: subtract a current zero "
-                f"(re-tare when unloaded) and moving-average the channels over ~{args.filter_window} samples."
+            "holdout_r2": dict(zip(AXES, holdout["r2"].round(4).tolist(), strict=True)),
+            "holdout_rmse": dict(zip(AXES, holdout["rmse"].round(4).tolist(), strict=True)),
+            "inference_note": (
+                "Re-zero the channels while unloaded before applying this matrix. Output is "
+                f"the wrench in the {args.frame} frame; use R_ufactory_from_diy and "
+                "diy_origin_in_ufactory_m from the npz to move it to another frame."
             ),
         },
     }, indent=2))
-    print(f"\nWrote {args.out}")
-    print(f"Deploy: point OpenFTSensorConfig.calibration_file at it. Re-tare when unloaded; "
-          f"apply the same ~{args.filter_window}-sample input filter.")
+
+    print(f"\nwrote {args.out}  (A, b, frame definition, preprocessing, metrics)")
+    print(f"wrote {args.json_out}  (driver-compatible)")
 
 
 if __name__ == "__main__":
