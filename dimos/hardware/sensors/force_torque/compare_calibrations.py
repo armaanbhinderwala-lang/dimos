@@ -239,9 +239,48 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
         print(f"wrote {log_path} ({len(rows)} rows)")
 
 
+def compare_offline(data_dir: Path, new_cal, old_cal) -> None:
+    """Score both calibrations against the uFactory on already-recorded sessions.
+
+    Needs no hardware, and uses far more data than you could push by hand -- so this is
+    the definitive answer to "is the new calibration better", with the live view being
+    the sanity check that it also behaves correctly in real time.
+    """
+    import session_data as sd
+
+    A_new, b_new = new_cal
+    sessions = sd.load_all(data_dir, frame="diy")
+    channels = np.vstack([s.channels for s in sessions])
+    truth = sd.diy_to_ufactory_frame(np.vstack([s.wrench for s in sessions]))
+    pred_new = sd.diy_to_ufactory_frame(channels @ A_new.T + b_new)
+
+    def rmse(pred):
+        return np.sqrt(((pred - truth) ** 2).mean(axis=0))
+
+    r_new = rmse(pred_new)
+    print(f"\n{len(channels):,} samples from {len(sessions)} sessions, scored against the uFactory\n")
+    if old_cal is None:
+        print(f"{'axis':>5} {'NEW RMSE':>12}")
+        for i, a in enumerate(AXES):
+            print(f"{a:>5} {r_new[i]:10.2f} {'N' if i < 3 else 'N*m'}")
+        return
+
+    A_old, b_old = old_cal
+    r_old = rmse(channels @ A_old.T + b_old)
+    print(f"{'axis':>5} {'OLD RMSE':>12} {'NEW RMSE':>12} {'improvement':>13}")
+    for i, a in enumerate(AXES):
+        unit = "N" if i < 3 else "N*m"
+        gain = (r_old[i] - r_new[i]) / r_old[i] * 100
+        print(f"{a:>5} {r_old[i]:10.2f} {unit:<3} {r_new[i]:10.2f} {unit:<3} {gain:+11.0f}%")
+    print(f"\nNEW better on {int((r_new < r_old).sum())}/6 axes")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--xarm-ip", required=True)
+    p.add_argument("--xarm-ip", help="required unless --offline")
+    p.add_argument("--offline", action="store_true",
+                   help="score both calibrations on recorded sessions instead of live hardware")
+    p.add_argument("--data-dir", type=Path, default=Path("."), help="where the session CSVs live (offline mode)")
     p.add_argument("--homemade-port", default="/dev/ttyACM0")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--new-cal", type=Path, default=Path("calibration_baseline.npz"))
@@ -260,6 +299,18 @@ def main() -> None:
         print(f"old calibration: {args.old_cal}  A{old_cal[0].shape}")
         print("NOTE: the old calibration's frame convention is undocumented; it is shown")
         print("      as-is and may differ from the uFactory frame by a rotation.")
+
+    if args.offline:
+        compare_offline(args.data_dir, new_cal, old_cal)
+        return
+    if not args.xarm_ip:
+        raise SystemExit("--xarm-ip is required for the live view (or pass --offline)")
+
+    print("\n" + "=" * 62)
+    print("  LIVE CALIBRATION COMPARISON  (not the data collector)")
+    print("  You should see FOUR bar rows: uFactory raw, uFactory calibrated,")
+    print("  homemade OLD cal, homemade NEW cal.")
+    print("=" * 62)
 
     uf = UFactoryReader(args.xarm_ip)
     hm = HomemadeReader(args.homemade_port, args.baud)
