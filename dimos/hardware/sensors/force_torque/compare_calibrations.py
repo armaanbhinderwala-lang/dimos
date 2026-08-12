@@ -108,7 +108,8 @@ def draw_bar_row(screen, font, y, label, values, colour):
     return y + 52
 
 
-def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal, log_path: Path | None) -> None:
+def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
+        log_path: Path | None, report_every: float = 60.0) -> None:
     if pygame is None:
         raise ImportError("pygame is required: pip install pygame")
 
@@ -127,6 +128,7 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal, log_path: Path
     err_true = ErrorTracker()   # same prediction, scored in the DIY frame (the honest one)
     rows: list[list[float]] = []
     running = True
+    last_report = 0.0          # periodic terminal summary, for debugging without watching the window
 
     while running:
         for event in pygame.event.get():
@@ -205,6 +207,23 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal, log_path: Path
             line = "  ".join(f"{i+1:2d}:{channels[i]:7.1f}" for i in range(r * 4, r * 4 + 4))
             screen.blit(small.render(line, True, (185, 185, 185)), (16, y)); y += 21
 
+        # Print a summary every `report_every` seconds so a run leaves a readable trace
+        # in the terminal -- useful when the window is on another machine, or afterwards.
+        now = time.time()
+        if report_every and now - last_report >= report_every:
+            last_report = now
+            rn_, ro_, rt_ = err_new.rmse(), err_old.rmse(), err_true.rmse()
+            print(f"\n[{time.strftime('%H:%M:%S')}]  |F| applied = {np.linalg.norm(truth[:3]):.1f} N")
+            print("            " + "".join(f"{a:>9}" for a in AXES))
+            print("  truth     " + "".join(f"{v:9.2f}" for v in truth))
+            print("  OLD cal   " + "".join(f"{v:9.2f}" for v in pred_old))
+            print("  NEW cal   " + "".join(f"{v:9.2f}" for v in pred_new))
+            if not np.isnan(rn_).any():
+                print("  RMSE OLD  " + "".join(f"{v:9.2f}" for v in ro_))
+                print("  RMSE NEW  " + "".join(f"{v:9.2f}" for v in rn_))
+                print(f"  -> NEW better on {int((rn_ < ro_).sum())}/6 axes")
+                print("  RMSE NEW (DIY frame, honest torque)" + "".join(f"{v:8.2f}" for v in rt_))
+
         pygame.display.flip()
         clock.tick(30)
 
@@ -229,6 +248,8 @@ def main() -> None:
     p.add_argument("--old-cal", type=Path, default=None,
                    help="previous ft_calibration.json, for comparison (optional)")
     p.add_argument("--log", type=Path, default=None, help="also record every frame to CSV")
+    p.add_argument("--report-every", type=float, default=60.0,
+                   help="seconds between terminal summaries (0 disables)")
     args = p.parse_args()
 
     new_cal = load_matrix(args.new_cal)
@@ -245,7 +266,7 @@ def main() -> None:
     uf.start(); hm.start()
     print("Press SPACE once, unloaded, to zero the homemade sensor before comparing.")
     try:
-        run(uf, hm, new_cal, old_cal, args.log)
+        run(uf, hm, new_cal, old_cal, args.log, args.report_every)
     finally:
         uf.stop(); hm.stop()
 
