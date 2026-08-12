@@ -124,6 +124,7 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
     clock = pygame.time.Clock()
 
     zero = np.zeros(CHANNELS)
+    zeroed = False              # until true, the matrix output is meaningless
     err_new, err_old = ErrorTracker(), ErrorTracker()
     err_true = ErrorTracker()   # same prediction, scored in the DIY frame (the honest one)
     rows: list[list[float]] = []
@@ -139,9 +140,19 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
                     running = False
                 elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
                     zero = hm.latest_channels.copy()
+                    zeroed = True
+                    print(f"[zeroed] baseline = {np.round(zero[:4], 1)} ...")
                     err_new.reset(); err_old.reset(); err_true.reset()
                 elif event.key == pygame.K_r:
                     err_new.reset(); err_old.reset(); err_true.reset()
+
+        # Auto-zero on the first real serial frame so the display is never garbage.
+        # SPACE re-zeros at any time; do it once while genuinely unloaded.
+        if not zeroed and np.any(hm.latest_channels):
+            zero = hm.latest_channels.copy()
+            zeroed = True
+            print(f"[auto-zeroed on first reading] baseline = {np.round(zero[:4], 1)} ...")
+            print("  press SPACE while unloaded to re-zero if the sensor was loaded at startup")
 
         channels = hm.latest_channels - zero
         truth = uf.latest_ext
@@ -169,7 +180,13 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
         screen.blit(font.render("Calibration comparison", True, (255, 255, 255)), (16, y)); y += 30
         screen.blit(small.render(
             "Arm does NOT move here -- position-hold and push by hand.  "
-            "SPACE re-zero   R reset stats   ESC quit", True, (255, 190, 90)), (16, y)); y += 34
+            "SPACE re-zero   R reset stats   ESC quit", True, (255, 190, 90)), (16, y)); y += 24
+        if not zeroed:
+            screen.blit(font.render("NOT ZEROED -- readings meaningless. Press SPACE unloaded.",
+                                    True, (235, 90, 90)), (16, y))
+        else:
+            screen.blit(small.render("zeroed OK", True, (120, 200, 140)), (16, y))
+        y += 30
 
         screen.blit(small.render("        " + "".join(f"{a:>10}" for a in AXES), True, (150, 150, 150)), (238, y)); y += 22
         y = draw_bar_row(screen, small, y, "uFactory raw", uf.latest_raw, (110, 110, 190))
