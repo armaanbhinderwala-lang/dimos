@@ -64,6 +64,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+import tempfile
 import numpy as np
 
 try:
@@ -726,6 +727,8 @@ def main() -> None:
                    help="guided 10-run static-weight protocol instead of the free-form keystroke UI")
     p.add_argument("--lever-mm", type=float, default=100.0, help="bending lever arm actually bolted on")
     p.add_argument("--start-run", type=int, default=1, help="resume the protocol at this run")
+    p.add_argument("--demo", action="store_true",
+                   help="drive the protocol UI with synthetic readings -- no xArm, no serial device")
     p.add_argument("--selftest", action="store_true", help="run no-hardware self-tests and exit")
     p.add_argument("--export-only", type=Path, default=None, help="re-export CSVs from an existing session DB, no hardware, and exit")
     args = p.parse_args()
@@ -737,8 +740,37 @@ def main() -> None:
         for path in export_csv(args.export_only):
             print(f"wrote {path}")
         return
+    if args.demo:
+        from ft_protocol import build_protocol
+
+        class _DemoReader:
+            """Slow drifting sine per axis, so the bars move and you can read the layout."""
+
+            def __init__(self, n: int, scale: float):
+                self._n, self._scale = n, scale
+
+            def _wave(self) -> np.ndarray:
+                t = time.time()
+                return self._scale * np.sin(t * 0.7 + np.arange(self._n) * 0.6)
+
+            latest_raw = property(lambda self: self._wave())
+            latest_ext = property(lambda self: self._wave())
+            latest_cal = property(lambda self: self._wave())
+            latest_channels = property(lambda self: self._wave())
+
+        demo_db = Path(tempfile.gettempdir()) / f"ft_protocol_demo_{int(time.time())}.db"
+        demo_log = ExperimentLog(demo_db)
+        runs = build_protocol(args.lever_mm)
+        print(f"DEMO -- synthetic readings, nothing is being measured. Scratch DB: {demo_db}")
+        try:
+            run_protocol_ui(_DemoReader(6, 8.0), _DemoReader(CHANNELS, 40.0), demo_log,
+                            runs, args.start_run)
+        finally:
+            demo_log.close()
+        return
+
     if not args.xarm_ip:
-        p.error("--xarm-ip is required (or pass --selftest / --export-only)")
+        p.error("--xarm-ip is required (or pass --selftest / --export-only / --demo)")
 
     db_path = args.db or Path(f"ft_calibration_session_{int(time.time())}.db")
     log = ExperimentLog(db_path, session_type=args.session_type)
