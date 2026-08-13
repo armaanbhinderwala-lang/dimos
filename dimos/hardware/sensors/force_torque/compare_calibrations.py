@@ -109,7 +109,8 @@ def draw_bar_row(screen, font, y, label, values, colour):
 
 
 def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
-        log_path: Path | None, report_every: float = 60.0) -> None:
+        log_path: Path | None, report_every: float = 60.0,
+        label_new: str = "NEW cal", label_old: str = "OLD cal") -> None:
     if pygame is None:
         raise ImportError("pygame is required: pip install pygame")
 
@@ -191,13 +192,13 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
         screen.blit(small.render("        " + "".join(f"{a:>10}" for a in AXES), True, (150, 150, 150)), (238, y)); y += 22
         y = draw_bar_row(screen, small, y, "uFactory raw", uf.latest_raw, (110, 110, 190))
         y = draw_bar_row(screen, small, y, "uFactory calibrated  <- truth", truth, (90, 200, 120))
-        y = draw_bar_row(screen, small, y, "homemade OLD cal", pred_old, (200, 150, 80))
-        y = draw_bar_row(screen, small, y, "homemade NEW cal", pred_new, (110, 190, 220))
+        y = draw_bar_row(screen, small, y, f"homemade {label_old}", pred_old, (200, 150, 80))
+        y = draw_bar_row(screen, small, y, f"homemade {label_new}", pred_new, (110, 190, 220))
 
         y += 6
         rn, ro = err_new.rmse(), err_old.rmse()
         screen.blit(font.render("Live error vs truth (RMSE, sliding window)", True, (230, 230, 230)), (16, y)); y += 30
-        for label, e, colour in (("OLD cal", ro, (200, 150, 80)), ("NEW cal", rn, (110, 190, 220))):
+        for label, e, colour in ((label_old, ro, (200, 150, 80)), (label_new, rn, (110, 190, 220))):
             screen.blit(small.render(label, True, colour), (16, y))
             for i in range(6):
                 txt = "--" if np.isnan(e[i]) else f"{e[i]:6.2f}"
@@ -205,11 +206,11 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
             y += 24
         if not np.isnan(rn).any() and not np.isnan(ro).any():
             better = int((rn < ro).sum())
-            msg = f"NEW better on {better}/6 axes"
+            msg = f"{label_new} better on {better}/6 axes"
             screen.blit(font.render(msg, True, (90, 200, 120) if better >= 4 else (200, 150, 80)), (16, y))
         y += 30
         rt = err_true.rmse()
-        screen.blit(small.render("NEW (DIY frame)", True, (170, 170, 170)), (16, y))
+        screen.blit(small.render(f"{label_new} (DIY frame)", True, (170, 170, 170)), (16, y))
         for i in range(6):
             txt = "--" if np.isnan(rt[i]) else f"{rt[i]:6.2f}"
             screen.blit(small.render(txt, True, (170, 170, 170)), (250 + i * 70, y))
@@ -233,12 +234,12 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
             print(f"\n[{time.strftime('%H:%M:%S')}]  |F| applied = {np.linalg.norm(truth[:3]):.1f} N")
             print("            " + "".join(f"{a:>9}" for a in AXES))
             print("  truth     " + "".join(f"{v:9.2f}" for v in truth))
-            print("  OLD cal   " + "".join(f"{v:9.2f}" for v in pred_old))
-            print("  NEW cal   " + "".join(f"{v:9.2f}" for v in pred_new))
+            print(f"  {label_old:<9} " + "".join(f"{v:9.2f}" for v in pred_old))
+            print(f"  {label_new:<9} " + "".join(f"{v:9.2f}" for v in pred_new))
             if not np.isnan(rn_).any():
-                print("  RMSE OLD  " + "".join(f"{v:9.2f}" for v in ro_))
-                print("  RMSE NEW  " + "".join(f"{v:9.2f}" for v in rn_))
-                print(f"  -> NEW better on {int((rn_ < ro_).sum())}/6 axes")
+                print(f"  RMSE {label_old:<4} " + "".join(f"{v:9.2f}" for v in ro_))
+                print(f"  RMSE {label_new:<4} " + "".join(f"{v:9.2f}" for v in rn_))
+                print(f"  -> {label_new} better on {int((rn_ < ro_).sum())}/6 axes")
                 print("  RMSE NEW (DIY frame, honest torque)" + "".join(f"{v:8.2f}" for v in rt_))
 
         pygame.display.flip()
@@ -302,7 +303,9 @@ def main() -> None:
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--new-cal", type=Path, default=Path("calibration_baseline.npz"))
     p.add_argument("--old-cal", type=Path, default=None,
-                   help="previous ft_calibration.json, for comparison (optional)")
+                   help="a second calibration to compare against (optional)")
+    p.add_argument("--label-new", default="NEW cal", help="display label for --new-cal")
+    p.add_argument("--label-old", default="OLD cal", help="display label for --old-cal")
     p.add_argument("--log", type=Path, default=None, help="also record every frame to CSV")
     p.add_argument("--report-every", type=float, default=60.0,
                    help="seconds between terminal summaries (0 disables)")
@@ -334,7 +337,7 @@ def main() -> None:
     uf.start(); hm.start()
     print("Press SPACE once, unloaded, to zero the homemade sensor before comparing.")
     try:
-        run(uf, hm, new_cal, old_cal, args.log, args.report_every)
+        run(uf, hm, new_cal, old_cal, args.log, args.report_every, args.label_new, args.label_old)
     finally:
         uf.stop(); hm.stop()
 
