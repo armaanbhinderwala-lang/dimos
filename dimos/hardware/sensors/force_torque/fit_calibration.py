@@ -50,10 +50,13 @@ from session_data import (
     CHANNELS,
     DIY_ORIGIN_IN_UFACTORY_M,
     R_UFACTORY_FROM_DIY,
+    UF_RATED,
     Session,
     find_sessions,
     load_all,
 )
+
+FULL_SCALE = np.array([UF_RATED[a] for a in AXES])
 
 
 # --------------------------------------------------------------------------- fit
@@ -167,6 +170,32 @@ def print_axis_table(title: str, m: dict[str, np.ndarray]) -> None:
         print(f"  {a:<5} {m['r2'][i]:8.3f} {m['mae'][i]:10.3f} {m['rmse'][i]:10.3f}   {unit}")
 
 
+def end_to_end(A: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Apply a full-scale load on axis j, read out G[i, j] of full scale on axis i.
+
+    Fit the forward sensitivity S (channels per unit load), then compose it with the
+    calibration. Ideal is the identity: 1.0 on the diagonal, 0.0 everywhere else. R2 hides
+    this -- a matrix can score well while under-reporting gain and leaking force into torque.
+    """
+    design = np.hstack([y, np.ones((len(y), 1))])
+    S = np.linalg.lstsq(design, x, rcond=None)[0][:-1].T
+    return (A @ S) * np.outer(1 / FULL_SCALE, FULL_SCALE)
+
+
+def print_cross_talk(G: np.ndarray) -> None:
+    print("\n  end-to-end response, % of full scale (want 100 on the diagonal, 0 off it)")
+    print(f"  {'read':<6}" + "".join(f"{a:>7}" for a in AXES) + "   <- applied")
+    for i, a in enumerate(AXES):
+        print(f"  {a:<6}" + "".join(f"{100 * G[i, j]:7.0f}" for j in range(len(AXES))))
+    off = np.abs(G - np.diag(np.diag(G)))
+    print(f"\n  mean gain {100 * np.diag(G).mean():.0f}%   worst cross-talk {100 * off.max():.0f}%"
+          f" ({AXES[np.unravel_index(off.argmax(), off.shape)[1]]}"
+          f" -> {AXES[np.unravel_index(off.argmax(), off.shape)[0]]})")
+    for i, a in enumerate(AXES):
+        if off[i].max() > G[i, i]:
+            print(f"  WARNING: {a} reads more cross-talk than real signal -- do not trust this axis.")
+
+
 def print_per_session(result: dict) -> None:
     print(f"\n  per-session held-out R2")
     print(f"  {'session':>12} {'n':>7}  " + "".join(f"{a:>7}" for a in AXES))
@@ -222,6 +251,8 @@ def main() -> None:
     A, b = fit_ridge(x_all, y_all, alpha) if alpha else fit_ols(x_all, y_all, with_bias=True)
     print_axis_table("Final fit on ALL sessions   [in-sample, optimistic by definition]",
                      metrics(y_all, predict(A, b, x_all)))
+
+    print_cross_talk(end_to_end(A, x_all, y_all))
 
     print(f"\n  bias magnitude |b| = {np.abs(b).max():.4f} (max element)")
     norms = np.linalg.norm(A, axis=1)
