@@ -592,6 +592,125 @@ def run_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLo
     pygame.quit()
 
 
+def write_step_table(runs, out: Path) -> Path:
+    """Label -> expected wrench, so the analysis can join gravity truth onto every sample."""
+    import csv as _csv
+
+    with out.open("w", newline="") as fh:
+        w = _csv.writer(fh)
+        w.writerow(["label", "run", "run_name", "kind", "mass_kg", "lever_mm", "angle_deg",
+                    "exp_fx", "exp_fy", "exp_fz", "exp_mx", "exp_my", "exp_mz"])
+        for run in runs:
+            for step in run.steps:
+                load = step.load
+                w.writerow([f"r{run.number}/{step.label}", run.number, run.name, load.kind,
+                            load.mass_kg, load.lever_mm, load.angle_deg, *load.wrench()])
+    return out
+
+
+def run_protocol_ui(ufactory: UFactoryReader, homemade: HomemadeReader, log: ExperimentLog,
+                    runs, start_run: int = 1) -> None:
+    """Guided static-weight protocol. ENTER advances, so each label is a clean held plateau."""
+    if pygame is None:
+        raise ImportError("pygame is required. Install it with: pip install pygame")
+
+    from ft_protocol import fmt
+
+    pygame.init()
+    screen = pygame.display.set_mode((1080, 1080))
+    pygame.display.set_caption("FT Protocol Collector")
+    font = pygame.font.Font(None, 38)
+    small = pygame.font.Font(None, 28)
+    tiny = pygame.font.Font(None, 24)
+    clock = pygame.time.Clock()
+
+    ri = max(0, min(len(runs) - 1, start_run - 1))
+    si, running, entered = 0, True, time.time()
+
+    def apply() -> None:
+        nonlocal entered
+        log.set_label(f"r{runs[ri].number}/{runs[ri].steps[si].label}")
+        entered = time.time()
+
+    apply()
+    while running:
+        run, step = runs[ri], runs[ri].steps[si]
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+                elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    if si + 1 < len(run.steps):
+                        si += 1
+                    elif ri + 1 < len(runs):
+                        ri, si = ri + 1, 0
+                    apply()
+                elif event.key == pygame.K_BACKSPACE:
+                    if si > 0:
+                        si -= 1
+                    elif ri > 0:
+                        ri, si = ri - 1, len(runs[ri - 1].steps) - 1
+                    apply()
+                elif event.key == pygame.K_n and ri + 1 < len(runs):
+                    ri, si = ri + 1, 0
+                    apply()
+                elif event.key == pygame.K_p and ri > 0:
+                    ri, si = ri - 1, 0
+                    apply()
+
+        run, step = runs[ri], runs[ri].steps[si]
+        held = time.time() - entered
+        ready = held >= step.hold_s
+
+        screen.fill((22, 23, 28))
+        y = 18
+        screen.blit(font.render(f"Run {run.number}/{len(runs)}  --  {run.name}", True, (255, 255, 255)), (20, y))
+        y += 42
+        screen.blit(small.render(f"goal:  {run.goal}", True, (170, 175, 185)), (20, y))
+        y += 30
+        screen.blit(small.render(f"setup: {run.setup}", True, (170, 175, 185)), (20, y))
+        y += 42
+
+        screen.blit(font.render(f"step {si + 1}/{len(run.steps)}:  {step.label}", True, (120, 220, 255)), (20, y))
+        y += 42
+        screen.blit(small.render(step.hint, True, (255, 205, 110)), (20, y))
+        y += 36
+        screen.blit(small.render(f"expected wrench:  {fmt(step.load.wrench())}", True, (150, 230, 170)), (20, y))
+        y += 38
+
+        colour = (110, 220, 140) if ready else (230, 170, 80)
+        screen.blit(font.render(f"held {held:4.1f}s / {step.hold_s:.0f}s"
+                                + ("   READY -- press ENTER" if ready else "   hold still..."),
+                                True, colour), (20, y))
+        y += 48
+
+        screen.blit(small.render("uFactory -- compensated", True, (210, 210, 210)), (20, y))
+        y += 34
+        y = _draw_bars(screen, tiny, y, ufactory.latest_ext)
+        y += 20
+        screen.blit(small.render("Homemade -- raw 16 channels", True, (210, 210, 210)), (20, y))
+        y += 34
+        channels = homemade.latest_channels
+        for row in range(6):
+            for col in range(3):
+                idx = row * 3 + col
+                if idx < CHANNELS:
+                    screen.blit(tiny.render(f"ch{idx + 1:>2}: {channels[idx]:9.1f}", True, (210, 210, 210)),
+                                (20 + col * 330, y + row * 28))
+        y += 6 * 28 + 16
+        for line in ("ENTER/SPACE: next step     BACKSPACE: previous     N/P: next/prev run     ESC: quit",
+                     "Let the load settle before advancing -- the hold timer is the plateau we average over."):
+            screen.blit(tiny.render(line, True, (155, 158, 165)), (20, y))
+            y += 26
+
+        pygame.display.flip()
+        clock.tick(30)
+
+    pygame.quit()
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--xarm-ip")
@@ -603,6 +722,10 @@ def main() -> None:
         "--session-type", choices=["fast", "slow"], default="fast",
         help="fast: 2-3s cycles, lots of variety. slow: 15-20s ramps. Run each as a separate session -- don't mix.",
     )
+    p.add_argument("--protocol", action="store_true",
+                   help="guided 10-run static-weight protocol instead of the free-form keystroke UI")
+    p.add_argument("--lever-mm", type=float, default=100.0, help="bending lever arm actually bolted on")
+    p.add_argument("--start-run", type=int, default=1, help="resume the protocol at this run")
     p.add_argument("--selftest", action="store_true", help="run no-hardware self-tests and exit")
     p.add_argument("--export-only", type=Path, default=None, help="re-export CSVs from an existing session DB, no hardware, and exit")
     args = p.parse_args()
@@ -636,7 +759,15 @@ def main() -> None:
     ufactory.start()
     homemade.start()
     try:
-        run_ui(ufactory, homemade, log)
+        if args.protocol:
+            from ft_protocol import build_protocol
+
+            runs = build_protocol(args.lever_mm)
+            steps_csv = write_step_table(runs, db_path.with_name(db_path.stem + "_protocol_steps.csv"))
+            print(f"wrote {steps_csv}  (label -> expected wrench from gravity)")
+            run_protocol_ui(ufactory, homemade, log, runs, args.start_run)
+        else:
+            run_ui(ufactory, homemade, log)
     finally:
         ufactory.stop()
         homemade.stop()
