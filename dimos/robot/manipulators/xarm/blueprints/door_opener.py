@@ -26,7 +26,7 @@ Shared wiring lives in _build() so they cannot drift.
 from __future__ import annotations
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.control.coordinator import ControlCoordinator
+from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.force_torque.ft_adaptive_pull_module import FTAdaptivePullModule
@@ -63,7 +63,20 @@ def _build(sensor_module, profile: str, tool_mass_kg: float,
             hardware=[hardware],
             # Pink IK lives here and owns the arm. The policy only publishes a TwistStamped;
             # solving IK itself would be a second writer and bypass joint-limit handling.
-            tasks=[eef_twist_task(hardware, robot_model=control_model, timeout=0.0)],
+            tasks=[
+                # No gripper params here on purpose: they make eef_twist claim the gripper and
+                # hold it open every tick, which overrides the one-shot [ and ] key commands.
+                eef_twist_task(hardware, robot_model=control_model, timeout=0.0),
+                # [ and ] publish a JointState on joint_command, and routing delivers that
+                # only to `servo` tasks. Without this the gripper keys do nothing.
+                TaskConfig(
+                    name="servo_gripper",
+                    type="servo",
+                    joint_names=hardware.gripper_joints,
+                    priority=20,
+                    params={"timeout": 0.0, "default_positions": [0.0]},
+                ),
+            ],
         ),
         sensor_module,
         # Tool mass goes to the PULL module, not here: gravity compensation needs the wrist
