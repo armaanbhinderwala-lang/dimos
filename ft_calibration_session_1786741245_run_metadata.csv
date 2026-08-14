@@ -1,0 +1,8 @@
+key,value
+baud,115200
+calibration_file,
+created_at,2026-08-14 14:00:45
+created_ts,1786741245.9946892
+homemade_port,none
+session_type,fast
+xarm_ip,192.168.1.197
