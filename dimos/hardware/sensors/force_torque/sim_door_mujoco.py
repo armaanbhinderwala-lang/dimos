@@ -165,8 +165,8 @@ def build_scene(model_dir: Path, handle_xyz: np.ndarray, hinge_offset_y: float =
              width="300" height="300"/>
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"/>
     <material name="mw_body" rgba="0.30 0.30 0.33 1"/>
-    <material name="mw_door" rgba="0.20 0.22 0.26 1"/>
-    <material name="mw_handle" rgba="0.85 0.85 0.88 1"/>
+    <material name="mw_door" rgba="0.62 0.72 0.82 1"/>
+    <material name="mw_handle" rgba="0.90 0.25 0.15 1"/>
     <material name="mount" rgba="0.22 0.24 0.28 1"/>
     <material name="table_top" rgba="0.55 0.45 0.35 1"/>
     <material name="table_leg" rgba="0.40 0.35 0.30 1"/>
@@ -326,18 +326,33 @@ class ArmSim:
         return float(min(np.min(q - self.q_lo), np.min(self.q_hi - q)))
 
 
+def _camera(model) -> "mujoco.MjvCamera":
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.lookat[:] = [0.42, 0.10, 0.34]
+    cam.distance, cam.azimuth, cam.elevation = 1.60, 158.0, -20.0
+    return cam
+
+
 def run(model_dir: Path, free_roll: bool, seconds: float, use_viewer: bool,
-        sigma_stop: float, verbose: bool, cfg: AdmittanceConfig | None = None) -> dict:
+        sigma_stop: float, verbose: bool, cfg: AdmittanceConfig | None = None,
+        record: Path | None = None, fps: int = 12) -> dict:
     sim = ArmSim(model_dir, free_roll)
     cfg = cfg or AdmittanceConfig()
+
+    renderer = camera = None
+    frames: list = []
+    if record is not None:
+        renderer = mujoco.Renderer(sim.model, 480, 640)
+        camera = _camera(sim.model)
     rate, dt = 25.0, 1.0 / 25.0
     sub = max(1, int(round(dt / sim.model.opt.timestep)))
 
     viewer = None
     if use_viewer:
-        import mujoco.viewer
-        try:
-            viewer = mujoco.viewer.launch_passive(sim.model, sim.data)
+        from mujoco import viewer as mj_viewer   # not `import mujoco.viewer`: that binds the
+        try:                                       # name `mujoco` locally and shadows the module
+            viewer = mj_viewer.launch_passive(sim.model, sim.data)
         except RuntimeError as exc:
             if "mjpython" not in str(exc):
                 raise
@@ -382,6 +397,9 @@ def run(model_dir: Path, free_roll: bool, seconds: float, use_viewer: bool,
 
         if viewer is not None:
             viewer.sync()
+        if renderer is not None and tick % max(1, int(rate / fps)) == 0:
+            renderer.update_scene(sim.data, camera)
+            frames.append(renderer.render().copy())
         if verbose and tick % 25 == 0:
             print(f"  t={tick / rate:5.1f}s  door={sim.door_deg:5.1f}deg  sigma={sigma:.4f}  "
                   f"F={res.resistance_force:5.1f}N  M={res.torque_mag:4.2f}Nm  "
@@ -389,6 +407,21 @@ def run(model_dir: Path, free_roll: bool, seconds: float, use_viewer: bool,
 
     if viewer is not None:
         viewer.close()
+    if frames:
+        from PIL import Image
+
+        record.parent.mkdir(parents=True, exist_ok=True)
+        keep = frames if len(frames) <= 160 else [frames[i] for i in
+                np.linspace(0, len(frames) - 1, 160).astype(int)]
+        images = [Image.fromarray(f) for f in keep]
+        images[0].save(record, save_all=True, append_images=images[1:],
+                       duration=int(1000 / fps), loop=0, optimize=True)
+        strip = Image.new("RGB", (640 * 4, 480 * 2), "white")
+        picks = np.linspace(0, len(images) - 1, 8).astype(int)
+        for i, idx in enumerate(picks):
+            strip.paste(images[int(idx)], ((i % 4) * 640, (i // 4) * 480))
+        strip.save(record.with_name(record.stem + "_filmstrip.png"))
+        print(f"wrote {record} ({len(frames)} frames) and {record.stem}_filmstrip.png")
     return {"door_deg": sim.door_deg, "reason": reason, "min_sigma": min_sigma,
             "seconds": min(ticks, tick + 1) / rate, "progress_m": progress}
 
@@ -403,6 +436,8 @@ def main() -> None:
     p.add_argument("--compare", action="store_true", help="run both modes and print the difference")
     p.add_argument("--force-cutoff", type=float, default=None, help="override AdmittanceConfig")
     p.add_argument("--torque-cutoff", type=float, default=None, help="override AdmittanceConfig")
+    p.add_argument("--record", type=Path, default=None, help="write an animated GIF + filmstrip")
+    p.add_argument("--fps", type=int, default=12)
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -425,7 +460,7 @@ def main() -> None:
         return
 
     r = run(args.model_dir, args.free_roll, args.seconds, args.viewer, args.sigma_stop,
-            args.verbose, cfg)
+            args.verbose, cfg, args.record, args.fps)
     print(f"\nmode={'free-roll' if args.free_roll else 'baseline'}  door={r['door_deg']:.1f}deg  "
           f"after {r['seconds']:.1f}s  min_sigma={r['min_sigma']:.4f}  -> {r['reason']}")
 
