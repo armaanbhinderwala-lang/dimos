@@ -127,7 +127,18 @@ def run(uf: UFactoryReader, hm: HomemadeReader, cals: list[dict],
     for c in cals:
         c["err"] = ErrorTracker()          # scored in the uFactory frame, against truth
         c["err_diy"] = ErrorTracker()      # the honest torque number
-    rows: list[list[float]] = []
+    # Stream to disk rather than buffering: a killed window or a crash used to lose the
+    # whole recording, which is exactly when you most want it.
+    writer = fh = None
+    if log_path is not None:
+        import csv as _csv
+        fh = log_path.open("w", newline="")
+        writer = _csv.writer(fh)
+        writer.writerow(["ts"] + [f"uf_raw_{a}" for a in AXES] + [f"uf_cal_{a}" for a in AXES]
+                        + [f"ch{i}" for i in range(1, CHANNELS + 1)]
+                        + [f"{c['name'].replace(' ', '_')}_{a}" for c in cals for a in AXES])
+        print(f"recording to {log_path}")
+    n_logged = 0
     running = True
     last_report = 0.0
 
@@ -167,9 +178,12 @@ def run(uf: UFactoryReader, hm: HomemadeReader, cals: list[dict],
             c["err"].add(c["pred"], truth)
             c["err_diy"].add(truth_diy, c["pred_diy"])
 
-        if log_path is not None:
-            rows.append([time.time(), *uf.latest_raw, *truth, *hm.latest_channels,
-                         *[v for c in cals for v in c["pred"]]])
+        if writer is not None:
+            writer.writerow([time.time(), *uf.latest_raw, *truth, *hm.latest_channels,
+                             *[v for c in cals for v in c["pred"]]])
+            n_logged += 1
+            if n_logged % 200 == 0:
+                fh.flush()
 
         screen.fill((24, 24, 28))
         y = 16
@@ -182,6 +196,9 @@ def run(uf: UFactoryReader, hm: HomemadeReader, cals: list[dict],
                                     True, (235, 90, 90)), (16, y))
         else:
             screen.blit(small.render("zeroed OK", True, (120, 200, 140)), (16, y))
+        if writer is not None:
+            screen.blit(small.render(f"REC  {n_logged:,} frames -> {log_path.name}",
+                                     True, (235, 120, 120)), (330, y))
         y += 30
 
         screen.blit(small.render("        " + "".join(f"{a:>10}" for a in AXES),
@@ -236,15 +253,9 @@ def run(uf: UFactoryReader, hm: HomemadeReader, cals: list[dict],
                     print(f"    {c['name']:<20}" + "".join(f"{v:9.2f}" for v in e))
 
     pygame.quit()
-    if log_path is not None and rows:
-        import csv as _csv
-        with log_path.open("w", newline="") as fh:
-            w = _csv.writer(fh)
-            w.writerow(["ts"] + [f"uf_raw_{a}" for a in AXES] + [f"uf_cal_{a}" for a in AXES]
-                       + [f"ch{i}" for i in range(1, CHANNELS + 1)]
-                       + [f"{c['name'].replace(' ', '_')}_{a}" for c in cals for a in AXES])
-            w.writerows(rows)
-        print(f"wrote {log_path} ({len(rows)} rows)")
+    if fh is not None:
+        fh.close()
+        print(f"wrote {log_path} ({n_logged:,} rows)")
 
 
 def compare_offline(data_dir: Path, cals: list[dict]) -> None:
