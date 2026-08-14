@@ -336,7 +336,17 @@ def run(model_dir: Path, free_roll: bool, seconds: float, use_viewer: bool,
     viewer = None
     if use_viewer:
         import mujoco.viewer
-        viewer = mujoco.viewer.launch_passive(sim.model, sim.data)
+        try:
+            viewer = mujoco.viewer.launch_passive(sim.model, sim.data)
+        except RuntimeError as exc:
+            if "mjpython" not in str(exc):
+                raise
+            raise SystemExit(
+                "--viewer needs mjpython on macOS (a GUI has to own the main thread).\n"
+                "Re-run the same command with mjpython instead of python:\n"
+                f"  {Path(sys.executable).parent / 'mjpython'} {' '.join(sys.argv)}\n"
+                "Headless runs (-v, --compare) work under plain python."
+            ) from exc
 
     prev_lin, prev_ang = np.zeros(3), np.zeros(3)
     progress, min_sigma, reason = 0.0, float("inf"), "completed"
