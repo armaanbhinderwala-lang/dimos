@@ -272,4 +272,12 @@ def load_all(
     filter_window: int = 0,
 ) -> list[Session]:
     ids = sessions or find_sessions(data_dir)
-    return [load_session(s, data_dir, frame, filter_window) for s in ids]
+    out = []
+    for s in ids:
+        try:
+            out.append(load_session(s, data_dir, frame, filter_window))
+        except ValueError as exc:
+            # uFactory-only runs (collector --no-homemade) have no channels to calibrate
+            # from. Skip them rather than failing every caller that scans the directory.
+            print(f"  skipping {s}: {exc}")
+    return out
