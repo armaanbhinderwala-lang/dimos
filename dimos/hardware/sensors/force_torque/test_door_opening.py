@@ -198,3 +198,104 @@ def test_arc_keeps_a_constant_radius():
     radii = np.linalg.norm(pts - hinge, axis=1)
     assert np.allclose(radii, radii[0]), "a hinge cannot change the radius"
     assert np.allclose(pts[:, 2], 0.3), "a vertical hinge cannot change height"
+
+
+# --------------------------------------------------------------- robustness
+def test_law_never_emits_nan_or_inf():
+    """A dropped serial frame or a bad calibration can produce garbage; it must not reach IK."""
+    cfg = AdmittanceConfig()
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        force = rng.normal(0, 30, 3)
+        torque = rng.normal(0, 3, 3)
+        vel = rng.normal(0, 0.05, 3)
+        r = compute_hybrid_twist(force, torque, np.eye(3), np.array([1.0, 0, 0]), cfg,
+                                 measured_velocity_world=vel)
+        assert np.all(np.isfinite(r.linear)), f"non-finite linear from F={force}"
+        assert np.all(np.isfinite(r.angular)), f"non-finite angular from M={torque}"
+
+
+def test_law_survives_degenerate_inputs():
+    cfg = AdmittanceConfig()
+    zero_drive = compute_hybrid_twist(np.zeros(3), np.zeros(3), np.eye(3), np.zeros(3), cfg)
+    assert np.all(np.isfinite(zero_drive.linear)), "zero drive direction must not divide by zero"
+
+    tiny = compute_hybrid_twist(np.full(3, 1e-12), np.zeros(3), np.eye(3),
+                                np.array([1.0, 0, 0]), cfg, measured_velocity_world=np.full(3, 1e-12))
+    assert np.all(np.isfinite(tiny.linear))
+
+    # Velocity exactly parallel to the radial load leaves no usable tangent.
+    parallel = compute_hybrid_twist(np.array([30.0, 0, 0]), np.zeros(3), np.eye(3),
+                                    np.array([1.0, 0, 0]), cfg,
+                                    measured_velocity_world=np.array([0.05, 0, 0]))
+    assert np.all(np.isfinite(parallel.linear))
+
+
+def test_hinge_fit_tolerates_sensor_noise():
+    """Real FK is not exact. A 5% radius error is usable; a wild one would misplace the arc."""
+    hinge = np.array([0.5, 0.4, 0.3])
+    clean = arc_waypoints(np.array([0.5, 0.0, 0.3]), hinge, np.array([0.0, 0.0, 1.0]),
+                          np.radians(25), 20)
+    for sigma_mm, tolerance_pct in ((0.5, 10.0), (1.0, 20.0)):
+        errors = []
+        for seed in range(20):
+            noisy = clean + np.random.default_rng(seed).normal(0, sigma_mm / 1000.0, clean.shape)
+            fit = fit_hinge(noisy)
+            if fit is not None:
+                errors.append(abs(fit[2] - 0.4) / 0.4 * 100)
+        assert errors, f"every fit failed at {sigma_mm}mm noise"
+        assert float(np.median(errors)) < tolerance_pct, \
+            f"{sigma_mm}mm noise -> median radius error {np.median(errors):.1f}%"
+
+
+def test_longer_probe_arc_fits_better():
+    """Justifies probing far enough: a short arc constrains a circle weakly."""
+    hinge = np.array([0.5, 0.4, 0.3])
+    medians = []
+    for degrees in (10, 25, 45):
+        clean = arc_waypoints(np.array([0.5, 0.0, 0.3]), hinge, np.array([0.0, 0.0, 1.0]),
+                              np.radians(degrees), 20)
+        errors = []
+        for seed in range(20):
+            noisy = clean + np.random.default_rng(seed).normal(0, 0.0005, clean.shape)
+            fit = fit_hinge(noisy)
+            if fit is not None:
+                errors.append(abs(fit[2] - 0.4) / 0.4 * 100)
+        medians.append(float(np.median(errors)))
+    assert medians[-1] < medians[0], f"longer arcs must fit better, got {medians}"
+
+
+def test_conditioner_pipeline_rejects_drift_but_passes_a_pull():
+    """End to end: a noisy, biased sensor must read zero at rest and track a real pull."""
+    c = WrenchConditioner(PROFILES["diy"])
+    rng = np.random.default_rng(0)
+    bias = np.array([2.0, -3.0, 8.0, 0.2, -0.3, 0.1])
+    noise = np.array([0.4, 0.4, 0.4, 0.02, 0.02, 0.02])  # below each deadband, per axis
+    c.begin_tare()
+    for _ in range(50):
+        c.apply(bias + rng.normal(0, noise))
+    for _ in range(50):
+        idle = c.apply(bias + rng.normal(0, noise))
+    assert np.allclose(idle, 0.0), f"idle sensor must read exactly zero, got {idle}"
+    for _ in range(60):
+        pulling = c.apply(bias + np.array([20.0, 0, 0, 0, 0, 0]) + rng.normal(0, noise))
+    assert 18.0 < pulling[0] < 22.0, f"a 20N pull must survive conditioning, got {pulling[0]:.1f}"
+
+
+def test_deadband_must_exceed_sensor_noise():
+    """Tuning requirement, not a code property: noise above the gate becomes a standing command.
+
+    Caught by an earlier version of the test above, where 0.4 Nm of torque noise leaked
+    0.13 Nm through a 0.10 Nm gate. On hardware, measure the resting noise per axis and set
+    the deadband above it, or the arm creeps with nothing touching it.
+    """
+    c = WrenchConditioner(PROFILES["diy"])
+    rng = np.random.default_rng(1)
+    c.begin_tare()
+    for _ in range(50):
+        c.apply(np.zeros(6))
+    leaked = np.zeros(6, dtype=bool)
+    for _ in range(200):
+        out = c.apply(rng.normal(0, np.array([0.4, 0.4, 0.4, 0.4, 0.4, 0.4])))
+        leaked |= np.abs(out) > 0
+    assert leaked[3:].any(), "torque noise above the gate is expected to leak -- see docstring"

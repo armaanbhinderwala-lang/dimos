@@ -491,68 +491,72 @@ class FTAdaptivePullModule(Module):
             logger.warning("No wrench or joint data yet -- is the FT sensor and coordinator running?")
             return
 
-        self._running = True
-        self._stop_requested = False
-        self.total_pull_distance = 0.0
-        self.total_rotation = 0.0
-        self.motion_count = 0
-        self.peak_resistance_force = 0.0
-        base = self.config.admittance
+        try:
+            self._running = True
+            self._stop_requested = False
+            self.total_pull_distance = 0.0
+            self.total_rotation = 0.0
+            self.motion_count = 0
+            self.peak_resistance_force = 0.0
+            base = self.config.admittance
 
-        logger.info("Probing door: speed=%.3fm/s over up to %.2fcm", self.config.probe_speed, self.config.probe_distance_m * 100)
-        probe_cfg = replace(
-            base,
-            drive_speed=self.config.probe_speed,
-            decel_start_m=self.config.probe_distance_m * 0.5,
-            decel_full_m=self.config.probe_distance_m,
-        )
-        probe = await self._run_phase("probe", probe_cfg, self.config.probe_distance_m, self.config.probe_max_duration)
-
-        arc_blocked_at = None
-        if (self._running and not self._stop_requested and not probe.safety_tripped
-                and self.config.check_arc_before_execute):
-            arc_blocked_at = self._assess_arc(probe)
-            if arc_blocked_at is not None and self.config.refuse_if_arc_blocked:
-                logger.warning(
-                    "Refusing to execute: the arm cannot follow this door past %.0f degrees "
-                    "from where it is holding. Re-grasp or reposition, then retry.",
-                    arc_blocked_at,
-                )
-                self._running = False
-
-        if self._running and not self._stop_requested and not probe.safety_tripped:
-            # Clamped below the sensor's own hardware overload rating (see admittance_pull_law.py)
-            # -- a calibrated cutoff above that can never actually protect anything, the hardware
-            # faults first regardless of what our software thinks is safe.
-            force_cutoff = min(
-                max(probe.peak_resistance_force * self.config.cutoff_safety_margin, self.config.min_force_cutoff),
-                SENSOR_FORCE_OVERLOAD_N * 0.8,
-            )
-            torque_cutoff = min(
-                max(probe.peak_torque * self.config.cutoff_safety_margin, self.config.min_torque_cutoff),
-                SENSOR_TORQUE_OVERLOAD_NM * 0.8,
-            )
-            logger.info(
-                "Probe measured peak_force=%.1fN peak_torque=%.1fNm -- executing with cutoffs force<=%.1fN torque<=%.1fNm",
-                probe.peak_resistance_force, probe.peak_torque, force_cutoff, torque_cutoff,
-            )
-            exec_cfg = replace(
+            logger.info("Probing door: speed=%.3fm/s over up to %.2fcm", self.config.probe_speed, self.config.probe_distance_m * 100)
+            probe_cfg = replace(
                 base,
-                drive_speed=self.config.execute_speed,
-                force_cutoff=force_cutoff,
-                torque_cutoff=torque_cutoff,
-                decel_start_m=self.config.execute_target_m * 0.5,
-                decel_full_m=self.config.execute_target_m,
+                drive_speed=self.config.probe_speed,
+                decel_start_m=self.config.probe_distance_m * 0.5,
+                decel_full_m=self.config.probe_distance_m,
             )
-            await self._run_phase("execute", exec_cfg, self.config.execute_target_m, self.config.max_duration)
-        elif probe.safety_tripped:
-            logger.warning("Probe itself hit a safety cutoff -- door may be jammed or grasp is off. Not proceeding to execute.")
+            probe = await self._run_phase("probe", probe_cfg, self.config.probe_distance_m, self.config.probe_max_duration)
 
-        self.coordinator_ee_twist_command.publish(
-            TwistStamped(frame_id=self.config.task_name, linear=[0, 0, 0], angular=[0, 0, 0])
-        )
-        self._running = False
-        self._phase = ""
+            arc_blocked_at = None
+            if (self._running and not self._stop_requested and not probe.safety_tripped
+                    and self.config.check_arc_before_execute):
+                arc_blocked_at = self._assess_arc(probe)
+                if arc_blocked_at is not None and self.config.refuse_if_arc_blocked:
+                    logger.warning(
+                        "Refusing to execute: the arm cannot follow this door past %.0f degrees "
+                        "from where it is holding. Re-grasp or reposition, then retry.",
+                        arc_blocked_at,
+                    )
+                    self._running = False
+
+            if self._running and not self._stop_requested and not probe.safety_tripped:
+                # Clamped below the sensor's own hardware overload rating (see admittance_pull_law.py)
+                # -- a calibrated cutoff above that can never actually protect anything, the hardware
+                # faults first regardless of what our software thinks is safe.
+                force_cutoff = min(
+                    max(probe.peak_resistance_force * self.config.cutoff_safety_margin, self.config.min_force_cutoff),
+                    SENSOR_FORCE_OVERLOAD_N * 0.8,
+                )
+                torque_cutoff = min(
+                    max(probe.peak_torque * self.config.cutoff_safety_margin, self.config.min_torque_cutoff),
+                    SENSOR_TORQUE_OVERLOAD_NM * 0.8,
+                )
+                logger.info(
+                    "Probe measured peak_force=%.1fN peak_torque=%.1fNm -- executing with cutoffs force<=%.1fN torque<=%.1fNm",
+                    probe.peak_resistance_force, probe.peak_torque, force_cutoff, torque_cutoff,
+                )
+                exec_cfg = replace(
+                    base,
+                    drive_speed=self.config.execute_speed,
+                    force_cutoff=force_cutoff,
+                    torque_cutoff=torque_cutoff,
+                    decel_start_m=self.config.execute_target_m * 0.5,
+                    decel_full_m=self.config.execute_target_m,
+                )
+                await self._run_phase("execute", exec_cfg, self.config.execute_target_m, self.config.max_duration)
+            elif probe.safety_tripped:
+                logger.warning("Probe itself hit a safety cutoff -- door may be jammed or grasp is off. Not proceeding to execute.")
+
+        finally:
+            # Unconditional: any escape from the loop -- exception, cancellation, cutoff --
+            # must leave the arm stopped, never holding the last non-zero twist.
+            self.coordinator_ee_twist_command.publish(
+                TwistStamped(frame_id=self.config.task_name, linear=[0, 0, 0], angular=[0, 0, 0])
+            )
+            self._running = False
+            self._phase = ""
         logger.info(
             "Pull finished: %d steps, %.1fcm, %.1fdeg, peak_resistance=%.1fN",
             self.motion_count, self.total_pull_distance * 100, np.degrees(self.total_rotation), self.peak_resistance_force,
