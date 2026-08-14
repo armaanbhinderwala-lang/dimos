@@ -119,6 +119,13 @@ class AdmittanceConfig:
     drive_steer_blend: float = 0.0
 
     # Hybrid force/velocity control (compute_hybrid_twist).
+    # World-frame weights on the measured force, [x y z]. Default trusts all three.
+    # Set (1, 1, 0) only when the sensor's Fz is untrustworthy AND the door swings on a
+    # VERTICAL hinge (microwave, fridge, cabinet), where vertical force carries no motion.
+    # An oven or dishwasher hinges horizontally and moves through the vertical plane, so
+    # zeroing Fz there deletes the axis the door actually travels along.
+    force_axis_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
     contact_force_n: float = 3.0        # radial load below this needs no correction
     min_motion_speed: float = 0.003     # m/s, below this motion is too slow to read a tangent from
     desired_radial_force: float = 5.0   # N, small but nonzero -- keeps the grasp loaded
@@ -220,11 +227,15 @@ def compute_hybrid_twist(
     if measured_velocity_world is None:
         measured_velocity_world = np.zeros(3)
     f_world, m_world = rotate_wrench_to_world(force_tool, torque_tool, ee_rot)
+    # Safety sees the FULL force; only the control terms use the weighted one, so a weighted
+    # axis can still trip a cutoff even though it never drives motion.
     resistance_force = float(np.linalg.norm(f_world))
     torque_mag = float(np.linalg.norm(m_world))
 
     if resistance_force > cfg.force_cutoff or torque_mag > cfg.torque_cutoff:
         return TwistResult(np.zeros(3), np.zeros(3), resistance_force, torque_mag, True)
+
+    f_world = f_world * np.asarray(cfg.force_axis_weights, float)
 
     speed = cfg.drive_speed * _progress_scale(
         progress_m, cfg.decel_start_m, cfg.decel_full_m, cfg.decel_floor_scale

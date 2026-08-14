@@ -115,13 +115,17 @@ def test_already_compensated_source_is_not_compensated_twice():
 def test_deadband_gates_noise_exactly_to_zero():
     """Stated relative to the profile, so retuning the floor cannot silently break the test."""
     p = PROFILES["diy"]
-    below = np.array([p.force_deadband_n * 0.5, -p.force_deadband_n * 0.9, 0.0,
-                      p.torque_deadband_nm * 0.5, -p.torque_deadband_nm * 0.9, 0.0])
-    assert np.allclose(deadband(below, p.force_deadband_n, p.torque_deadband_nm), 0.0), \
+    thr = p.deadbands
+    below = thr * 0.5 * np.array([1, -1, 1, -1, 1, -1])
+    assert np.allclose(deadband(below, thr), 0.0), \
         "sub-threshold must be exactly zero, or the arm creeps in free air"
-    above = np.array([p.force_deadband_n * 3, 0, 0, p.torque_deadband_nm * 3, 0, 0])
-    kept = deadband(above, p.force_deadband_n, p.torque_deadband_nm)
-    assert np.isclose(kept[0], above[0]) and np.isclose(kept[3], above[3])
+    above = thr * 3
+    kept = deadband(above, thr)
+    # Soft deadband: the floor is SUBTRACTED, keeping the output continuous at the boundary.
+    assert np.allclose(kept, above - thr)
+    assert np.all(np.diff([float(deadband(np.r_[v, np.zeros(5)], thr)[0])
+                           for v in np.linspace(0, thr[0] * 2, 40)]) >= -1e-12), \
+        "output must never step backwards as input rises"
 
 
 def test_ema_starts_at_the_signal_and_blunts_spikes():
@@ -270,10 +274,11 @@ def test_longer_probe_arc_fits_better():
 
 def test_conditioner_pipeline_rejects_drift_but_passes_a_pull():
     """End to end: a noisy, biased sensor must read zero at rest and track a real pull."""
-    c = WrenchConditioner(PROFILES["diy"])
+    p = PROFILES["diy"]
+    c = WrenchConditioner(p)
     rng = np.random.default_rng(0)
     bias = np.array([2.0, -3.0, 8.0, 0.2, -0.3, 0.1])
-    noise = np.array([0.4, 0.4, 0.4, 0.02, 0.02, 0.02])  # below each deadband, per axis
+    noise = p.deadbands * 0.25  # comfortably below each axis floor
     c.begin_tare()
     for _ in range(50):
         c.apply(bias + rng.normal(0, noise))
@@ -282,7 +287,9 @@ def test_conditioner_pipeline_rejects_drift_but_passes_a_pull():
     assert np.allclose(idle, 0.0), f"idle sensor must read exactly zero, got {idle}"
     for _ in range(60):
         pulling = c.apply(bias + np.array([20.0, 0, 0, 0, 0, 0]) + rng.normal(0, noise))
-    assert 18.0 < pulling[0] < 22.0, f"a 20N pull must survive conditioning, got {pulling[0]:.1f}"
+    expected = 20.0 - p.deadbands[0]          # soft deadband subtracts the floor
+    assert abs(pulling[0] - expected) < 2.0, \
+        f"a 20N pull should read ~{expected:.1f}N after conditioning, got {pulling[0]:.1f}"
 
 
 def test_deadband_must_exceed_sensor_noise():
@@ -314,3 +321,31 @@ def test_deadband_must_exceed_sensor_noise():
     small = np.r_[np.full(3, p.force_deadband_n * 0.1), np.full(3, p.torque_deadband_nm * 0.1)]
     for _ in range(300):
         assert np.allclose(c2.apply(rng.normal(0, small)), 0.0), "sub-gate noise must stay gated"
+
+
+def test_force_axis_weights_default_to_trusting_everything():
+    """A per-rig workaround must not become a hidden per-door assumption."""
+    assert AdmittanceConfig().force_axis_weights == (1.0, 1.0, 1.0)
+
+
+def test_weighted_axis_cannot_drive_motion_but_can_still_trip_safety():
+    import dataclasses
+    cfg = dataclasses.replace(AdmittanceConfig(), force_axis_weights=(1.0, 1.0, 0.0))
+    moving = np.array([0.0, 0.02, 0.0])
+    r = compute_hybrid_twist(np.array([0.0, 0.0, 40.0]), np.zeros(3), np.eye(3),
+                             np.array([1.0, 0, 0]), cfg, measured_velocity_world=moving)
+    assert abs(r.linear[2]) < 1e-9, "a zero-weighted axis must not steer the arm"
+    over = compute_hybrid_twist(np.array([0.0, 0.0, cfg.force_cutoff + 5]), np.zeros(3),
+                                np.eye(3), np.array([1.0, 0, 0]), cfg)
+    assert over.safety_stop, "safety must still see the unweighted force"
+
+
+def test_gravity_compensation_removes_a_rotating_tool_load():
+    """The failure this prevents: 22 N of tool weight tilting into Fx/Fy as the wrist turns."""
+    mass, com = 2.2, np.zeros(3)
+    for ee in (np.eye(3),
+               np.array([[0, 0, 1.0], [0, 1.0, 0], [-1.0, 0, 0]]),
+               np.array([[1.0, 0, 0], [0, 0, -1.0], [0, 1.0, 0]])):
+        measured = tool_gravity_wrench(ee, mass, com)          # tool weight alone
+        assert np.allclose(measured - tool_gravity_wrench(ee, mass, com), 0.0, atol=1e-12), \
+            "compensation must cancel the tool exactly, in every orientation"

@@ -62,6 +62,7 @@ from dimos.hardware.sensors.force_torque.admittance_pull_law import (
     singularity_speed_scale,
     slew_limit,
 )
+from dimos.hardware.sensors.force_torque.ft_conditioning import tool_gravity_wrench
 from dimos.manipulation.planning.utils.mesh_utils import prepare_urdf_for_drake
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.geometry_msgs.WrenchStamped import WrenchStamped
@@ -136,6 +137,16 @@ class FTAdaptivePullConfig(ModuleConfig):
     cutoff_safety_margin: float = 2.5
     min_force_cutoff: float = 30.0  # N
     min_torque_cutoff: float = 4.0  # N*m
+
+    # Tool weight hanging off the sensor. The DIY sensor has no gravity compensation, so a
+    # mounted gripper reads as a standing force that TILTS INTO Fx/Fy as the wrist rotates
+    # through the door arc -- indistinguishable from real resistance unless removed per tick.
+    # 0.0 disables it (the uFactory already compensates its own stream).
+    tool_mass_kg: float = 0.0
+    tool_com_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    # See AdmittanceConfig.force_axis_weights. Vertical-hinge doors only.
+    force_axis_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     control_rate_hz: float = 25.0
     auto_run: bool = False
@@ -372,6 +383,10 @@ class FTAdaptivePullModule(Module):
 
             pose = self._forward_kinematics(q)
             ee_rot = np.asarray(pose.rotation)
+            if self.config.tool_mass_kg > 0.0:
+                g = tool_gravity_wrench(ee_rot, self.config.tool_mass_kg,
+                                        np.array(self.config.tool_com_m))
+                force_tool, torque_tool = force_tool - g[:3], torque_tool - g[3:]
             if stats.ticks < 3:
                 logger.info("[%s] EE pose tick %d: translation=%s -- sanity check this", name, stats.ticks, pose.translation)
 
@@ -498,7 +513,8 @@ class FTAdaptivePullModule(Module):
             self.total_rotation = 0.0
             self.motion_count = 0
             self.peak_resistance_force = 0.0
-            base = self.config.admittance
+            base = replace(self.config.admittance,
+                       force_axis_weights=self.config.force_axis_weights)
 
             logger.info("Probing door: speed=%.3fm/s over up to %.2fcm", self.config.probe_speed, self.config.probe_distance_m * 100)
             probe_cfg = replace(

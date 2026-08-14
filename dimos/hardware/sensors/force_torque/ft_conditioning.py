@@ -40,6 +40,9 @@ class ConditioningProfile:
     force_deadband_n: float
     torque_deadband_nm: float
     ema_alpha_torque: float | None = None   # defaults to ema_alpha when unset
+    # Per-axis floors, in [fx fy fz mx my mz] order. A single global floor would have to be
+    # set by the worst axis -- on this sensor Fz drifts ~5 N, which would blind Fx and Fy.
+    deadbands: np.ndarray | None = None
     tool_mass_kg: float = 0.0
     tool_com_m: np.ndarray = field(default_factory=lambda: np.zeros(3))
     already_gravity_compensated: bool = False
@@ -48,8 +51,12 @@ class ConditioningProfile:
 PROFILES: dict[str, ConditioningProfile] = {
     # Measured from a 3,233-frame live recording: 3-sigma detectable change is 6.4/5.2/7.4 N
     # and 0.67/0.69/0.32 N*m. Deadbands sit at that floor so the arm cannot creep on noise.
-    "diy": ConditioningProfile(ema_alpha=0.50, ema_alpha_torque=0.15,
-                               force_deadband_n=7.4, torque_deadband_nm=0.69),
+    "diy": ConditioningProfile(
+        ema_alpha=0.50, ema_alpha_torque=0.15,
+        force_deadband_n=3.5, torque_deadband_nm=0.35,
+        # Measured with gripper + camera mounted, hands off: Fx/Fy/Mx/My/Mz are fast noise
+        # (filterable), Fz is slow drift that filtering cannot remove -- hence its wide floor.
+        deadbands=np.array([3.5, 2.5, 15.0, 0.35, 0.40, 0.20])),
     "factory": ConditioningProfile(ema_alpha=0.35, force_deadband_n=0.5, torque_deadband_nm=0.03,
                                    already_gravity_compensated=True),
 }
@@ -69,12 +76,15 @@ def tool_gravity_wrench(ee_rot: np.ndarray, mass_kg: float, com_m: np.ndarray) -
     return np.hstack([force_sensor, np.cross(np.asarray(com_m, float), force_sensor)])
 
 
-def deadband(wrench: np.ndarray, force_n: float, torque_nm: float) -> np.ndarray:
-    """Zero sub-noise values, else drift becomes a standing velocity command in free air."""
-    out = np.asarray(wrench, float).copy()
-    out[:3] = np.where(np.abs(out[:3]) < force_n, 0.0, out[:3])
-    out[3:] = np.where(np.abs(out[3:]) < torque_nm, 0.0, out[3:])
-    return out
+def deadband(wrench: np.ndarray, thresholds: np.ndarray) -> np.ndarray:
+    """Soft deadband: zero below the floor, and subtract it above.
+
+    Subtracting keeps the output continuous. A hard gate jumps from 0 to the full threshold
+    the instant it is crossed, which the control law sees as a step and turns into a lurch.
+    """
+    w = np.asarray(wrench, float)
+    thr = np.asarray(thresholds, float)
+    return np.where(np.abs(w) < thr, 0.0, w - np.sign(w) * thr)
 
 
 class WrenchConditioner:
@@ -121,5 +131,8 @@ class WrenchConditioner:
             ema(None if prev is None else prev[:3], wrench[:3], self.profile.ema_alpha),
             ema(None if prev is None else prev[3:], wrench[3:], alpha_t),
         ])
-        return deadband(self._filtered, self.profile.force_deadband_n,
-                        self.profile.torque_deadband_nm)
+        thr = self.profile.deadbands
+        if thr is None:
+            thr = np.r_[np.full(3, self.profile.force_deadband_n),
+                        np.full(3, self.profile.torque_deadband_nm)]
+        return deadband(self._filtered, thr)

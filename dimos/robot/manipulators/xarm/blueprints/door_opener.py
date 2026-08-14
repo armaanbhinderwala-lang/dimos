@@ -48,7 +48,8 @@ _ft_transports = {
 }
 
 
-def _build(sensor_module, profile: str, tool_mass_kg: float):
+def _build(sensor_module, profile: str, tool_mass_kg: float,
+           force_axis_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)):
     hardware = xarm7_hardware("arm", gripper=True, mock_without_address=True)
     # add_gripper=False makes the tip frame "link7"; the pull module must name the same frame
     # or its FK describes a different point than the one being moved.
@@ -65,7 +66,9 @@ def _build(sensor_module, profile: str, tool_mass_kg: float):
             tasks=[eef_twist_task(hardware, robot_model=control_model, timeout=0.0)],
         ),
         sensor_module,
-        FTConditionerModule.blueprint(profile=profile, tool_mass_kg=tool_mass_kg),
+        # Tool mass goes to the PULL module, not here: gravity compensation needs the wrist
+        # orientation, and only that module computes forward kinematics.
+        FTConditionerModule.blueprint(profile=profile),
         FTAdaptivePullModule.blueprint(
             hardware_id="arm",
             num_arm_joints=7,
@@ -73,6 +76,8 @@ def _build(sensor_module, profile: str, tool_mass_kg: float):
             package_paths=control_model.package_paths,
             xacro_args=control_model.xacro_args,
             tool_frame_name="link7",
+            tool_mass_kg=tool_mass_kg,
+            force_axis_weights=force_axis_weights,
             auto_run=False,
         ),
         WrenchPlotter.blueprint(),
@@ -92,8 +97,11 @@ door_opener_xarm7 = _build(
 )
 
 # Homemade sensor: 6x16 calibration applied in the driver, no gravity comp of its own.
+# Fz weighted 0: this sensor's Fz drifts ~5 N, and a microwave/fridge/cabinet hinge is
+# vertical so vertical force carries no door motion. Set it back to 1 for an oven.
 door_opener_xarm7_diy = _build(
     OpenFTSensor.blueprint(),
     profile="diy",
     tool_mass_kg=DIY_TOOL_MASS_KG,
+    force_axis_weights=(1.0, 1.0, 0.0),
 )
