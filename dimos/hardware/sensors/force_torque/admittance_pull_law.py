@@ -113,6 +113,12 @@ class AdmittanceConfig:
     # the fix for the stall we are chasing.
     drive_steer_blend: float = 0.0
 
+    # Hybrid force/velocity control (compute_hybrid_twist).
+    contact_force_n: float = 3.0        # radial load below this needs no correction
+    min_motion_speed: float = 0.003     # m/s, below this motion is too slow to read a tangent from
+    desired_radial_force: float = 5.0   # N, small but nonzero -- keeps the grasp loaded
+    k_force: float = 0.004              # (m/s)/N, how hard radial force error is corrected
+
 
 @dataclass
 class TwistResult:
@@ -136,6 +142,144 @@ def slew_limit(prev: np.ndarray, target: np.ndarray, max_delta: float) -> np.nda
     if norm <= max_delta or norm < 1e-12:
         return target
     return prev + delta * (max_delta / norm)
+
+
+def fit_hinge(points_world: np.ndarray) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """Recover a door's hinge from where the gripper has actually been.
+
+    The probe already moves the handle a few centimetres, and those points lie on the door's
+    circle whether anyone measured it or not. Fitting that circle gives hinge and radius with
+    no prior model, which is what lets the arc check work on an oven, a fridge or a microwave
+    without being told which it is.
+
+    Returns (centre, axis, radius), or None when the motion is too straight to call -- a
+    drawer, or a door that has barely moved, where any circle fit is numerical noise.
+    """
+    pts = np.asarray(points_world, float)
+    if len(pts) < 5:
+        return None
+    centroid = pts.mean(axis=0)
+    centred = pts - centroid
+    # Motion plane = the two strongest singular directions; the weakest is its normal, which
+    # for a hinged door is the hinge axis.
+    _, sing, vt = np.linalg.svd(centred, full_matrices=False)
+    if sing[1] < 1e-12:
+        return None
+    axis, u, v = vt[2], vt[0], vt[1]
+    x, y = centred @ u, centred @ v
+    # Algebraic circle fit: x^2 + y^2 = 2*cx*x + 2*cy*y + c
+    sol, *_ = np.linalg.lstsq(np.column_stack([2 * x, 2 * y, np.ones(len(x))]),
+                              x**2 + y**2, rcond=None)
+    cx, cy, c = sol
+    radius_sq = c + cx**2 + cy**2
+    if radius_sq <= 0:
+        return None
+    radius = float(np.sqrt(radius_sq))
+    # Reject what the data cannot support: a nearly straight sweep "fits" a huge circle whose
+    # centre is meaningless. Demand visible curvature over the span actually travelled.
+    span = float(np.linalg.norm(pts[-1] - pts[0]))
+    if radius > 5.0 or span < 1e-9 or radius / span > 50.0:
+        return None
+    return centroid + cx * u + cy * v, axis, radius
+
+
+def arc_waypoints(
+    grasp_world: np.ndarray,
+    hinge_point_world: np.ndarray,
+    hinge_axis_world: np.ndarray,
+    max_angle_rad: float,
+    count: int = 10,
+) -> np.ndarray:
+    """Where the handle will be, every step of the way to max_angle_rad.
+
+    A hinged door gives the gripper no choice: its path is a circle about the hinge. So the
+    whole trajectory is known the moment the hinge is, and whether the arm can follow it is
+    decided BEFORE the pull starts -- not something a controller can rescue halfway through.
+    Checking these points against the arm's reach and conditioning is what catches "opens to
+    50 degrees and jams" while there is still time to re-grasp somewhere better.
+    """
+    axis = np.asarray(hinge_axis_world, float)
+    axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+    radial = np.asarray(grasp_world, float) - np.asarray(hinge_point_world, float)
+    radial = radial - np.dot(radial, axis) * axis            # drop any along-axis component
+    out = []
+    for angle in np.linspace(0.0, max_angle_rad, count):
+        cos_a, sin_a = np.cos(angle), np.sin(angle)
+        # Rodrigues, with radial already perpendicular to axis
+        rotated = radial * cos_a + np.cross(axis, radial) * sin_a
+        out.append(np.asarray(hinge_point_world, float) + rotated)
+    return np.array(out)
+
+
+def compute_hybrid_twist(
+    force_tool: np.ndarray,
+    torque_tool: np.ndarray,
+    ee_rot: np.ndarray,
+    drive_direction_world: np.ndarray,
+    cfg: AdmittanceConfig,
+    measured_velocity_world: np.ndarray | None = None,
+    progress_m: float = 0.0,
+    singularity_scale: float = 1.0,
+) -> TwistResult:
+    """Hybrid force/velocity control: velocity along the tangent, force along the radial.
+
+    compute_twist commands a VELOCITY in every direction, including the one the door
+    physically cannot move in, and leaves compliance to mop up the difference. Against a
+    stiff constraint that does not converge -- the unusable component becomes position error
+    every tick and force climbs without bound until a cutoff fires.
+
+    The standard fix (Karayiannidis et al., "Open Sesame!", IROS 2012) splits the two apart:
+    a door constrains exactly one direction, and the constraint force points along it, so the
+    measured force IS the radial estimate -- no hinge position, no radius, no door model.
+    Command velocity only along the tangent, and REGULATE force along the radial to a small
+    target instead of commanding motion into it. Wrong tangent guesses then cost a little
+    force rather than an unbounded one, which is what makes it work on a door whose geometry
+    you never measured.
+    """
+    if measured_velocity_world is None:
+        measured_velocity_world = np.zeros(3)
+    f_world, m_world = rotate_wrench_to_world(force_tool, torque_tool, ee_rot)
+    resistance_force = float(np.linalg.norm(f_world))
+    torque_mag = float(np.linalg.norm(m_world))
+
+    if resistance_force > cfg.force_cutoff or torque_mag > cfg.torque_cutoff:
+        return TwistResult(np.zeros(3), np.zeros(3), resistance_force, torque_mag, True)
+
+    speed = cfg.drive_speed * _progress_scale(
+        progress_m, cfg.decel_start_m, cfg.decel_full_m, cfg.decel_floor_scale
+    )
+
+    # Tangent comes from MOTION, not from force. The constraint permits exactly one direction,
+    # so whichever way the tool is actually travelling IS the tangent -- no door model needed.
+    # Taking it from the force instead fails at the worst moment: before the door breaks free
+    # the resistance is head-on, so force is antiparallel to the drive, the "tangent" cancels
+    # to zero and the robot stops pushing exactly when it needs to push.
+    speed_now = float(np.linalg.norm(measured_velocity_world))
+    if speed_now > cfg.min_motion_speed:
+        tangent = measured_velocity_world / speed_now
+    else:
+        tangent = drive_direction_world / max(float(np.linalg.norm(drive_direction_world)), 1e-12)
+
+    # Radial load is whatever part of the force the tangent cannot account for. Friction acts
+    # along the tangent and is the price of moving; only the perpendicular part is the arm
+    # fighting the constraint, and only that part should be regulated away.
+    radial_force = f_world - np.dot(f_world, tangent) * tangent
+    radial_mag = float(np.linalg.norm(radial_force))
+    if radial_mag > cfg.contact_force_n:
+        radial = radial_force / radial_mag
+        correction = np.clip(cfg.k_force * (cfg.desired_radial_force - radial_mag),
+                             -cfg.max_lateral_speed, cfg.max_lateral_speed)
+        linear = speed * tangent + correction * radial
+    else:
+        linear = speed * tangent
+
+    omega = -cfg.k_rot * m_world
+    omega_norm = float(np.linalg.norm(omega))
+    if omega_norm > cfg.max_rotation_rate:
+        omega *= cfg.max_rotation_rate / omega_norm
+
+    return TwistResult(linear * singularity_scale, omega * singularity_scale,
+                       resistance_force, torque_mag, False)
 
 
 def steer_drive_direction(
@@ -339,5 +483,48 @@ if __name__ == "__main__":
     assert np.allclose(step / np.linalg.norm(step), full / np.linalg.norm(full)), "step direction must match prev->target"
     small_change = prev + np.array([0.0, 0.01, 0.0])
     assert np.allclose(slew_limit(prev, small_change, max_delta=0.05), small_change), "small changes pass through untouched"
+
+    print("\n=== Case 12: arc waypoints trace a circle about the hinge ===")
+    hinge = np.array([0.5, 0.4, 0.3]); grasp = np.array([0.5, 0.0, 0.3])
+    pts = arc_waypoints(grasp, hinge, np.array([0.0, 0.0, 1.0]), np.radians(90), count=10)
+    radii = [np.linalg.norm(p - hinge) for p in pts]
+    print(f"radius over the arc: min={min(radii):.4f} max={max(radii):.4f} (must be constant)")
+    assert np.allclose(radii, radii[0], atol=1e-9), "a hinge cannot change the radius"
+    assert np.allclose(pts[0], grasp), "the arc must start at the grasp"
+    assert np.isclose(np.linalg.norm(pts[-1] - hinge), 0.4)
+    assert np.allclose([p[2] for p in pts], 0.3), "a vertical hinge keeps height constant"
+    # 90 degrees about +Z takes (0,-0.4) to (0.4, 0)
+    assert np.allclose(pts[-1], hinge + np.array([0.4, 0.0, 0.0]), atol=1e-9), pts[-1]
+
+    print("\n=== Case 13: with the door moving, never push into the RADIAL load ===")
+    ee = np.eye(3)
+    moving = np.array([0.0, 0.03, 0.0])          # travelling +Y, so +Y is the tangent
+    for fx in (10.0, 30.0, 60.0):
+        f = np.array([fx, 0.0, 0.0])             # constraint pushes back along +X
+        r = compute_hybrid_twist(f, np.zeros(3), ee, np.array([1.0, 0, 0]), cfg,
+                                 measured_velocity_world=moving)
+        print(f"  radial |F|={fx:5.1f}N -> radial vel {r.linear[0]:+.4f}, tangential {r.linear[1]:+.4f}")
+        assert r.linear[0] < 0, "must retreat along a radial that is already loaded"
+        assert r.linear[1] > 0, "and must keep making progress along the tangent"
+
+    print("\n=== Case 14: before it breaks free, push along the hint (a latch needs breaking) ===")
+    r = compute_hybrid_twist(np.array([20.0, 0, 0]), np.zeros(3), ee, np.array([1.0, 0, 0]), cfg,
+                             measured_velocity_world=np.zeros(3))
+    print(f"  stationary, head-on resistance -> {r.linear[0]:+.4f} m/s along the drive")
+    assert np.isclose(r.linear[0], cfg.drive_speed), "a stalled door must still be pushed"
+
+    print("\n=== Case 15: friction along the tangent is NOT treated as radial load ===")
+    # Force purely opposing motion is the cost of moving, not the arm fighting the constraint.
+    r = compute_hybrid_twist(np.array([0.0, -40.0, 0.0]), np.zeros(3), ee, np.array([1.0, 0, 0]),
+                             cfg, measured_velocity_world=moving)
+    print(f"  40N of pure drag -> radial correction {np.linalg.norm(r.linear - r.linear[1] * np.array([0, 1.0, 0])):.5f} m/s")
+    assert np.allclose(r.linear, [0, cfg.drive_speed, 0], atol=1e-9), "drag must not trigger retreat"
+
+    print("\n=== Case 16: the tangent follows measured motion, so the arc is tracked ===")
+    for vel, want in [(np.array([0.0, 0.03, 0.0]), 1), (np.array([0.0, -0.03, 0.0]), -1)]:
+        r = compute_hybrid_twist(np.zeros(3), np.zeros(3), ee, np.array([1.0, 0, 0]), cfg,
+                                 measured_velocity_world=vel)
+        print(f"  moving {vel} -> commanded {np.round(r.linear, 4)}")
+        assert np.sign(r.linear[1]) == want, "must keep going the way the door is actually opening"
 
     print("\nAll self-tests passed.")
