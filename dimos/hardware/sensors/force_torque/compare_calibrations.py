@@ -108,29 +108,28 @@ def draw_bar_row(screen, font, y, label, values, colour):
     return y + 52
 
 
-def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
-        log_path: Path | None, report_every: float = 60.0,
-        label_new: str = "NEW cal", label_old: str = "OLD cal") -> None:
+def run(uf: UFactoryReader, hm: HomemadeReader, cals: list[dict],
+        log_path: Path | None, report_every: float = 60.0) -> None:
+    """cals: [{name, A, b, frame, colour}] -- one bar row and one error row each."""
     if pygame is None:
         raise ImportError("pygame is required: pip install pygame")
 
-    A_new, b_new = new_cal
-    A_old, b_old = old_cal if old_cal else (None, None)
-
     pygame.init()
-    screen = pygame.display.set_mode((980, 700))
+    height = 420 + 34 * len(cals) * 2
+    screen = pygame.display.set_mode((1060, height))
     pygame.display.set_caption("Calibration comparison")
     font = pygame.font.Font(None, 26)
     small = pygame.font.Font(None, 21)
     clock = pygame.time.Clock()
 
     zero = np.zeros(CHANNELS)
-    zeroed = False              # until true, the matrix output is meaningless
-    err_new, err_old = ErrorTracker(), ErrorTracker()
-    err_true = ErrorTracker()   # same prediction, scored in the DIY frame (the honest one)
+    zeroed = False
+    for c in cals:
+        c["err"] = ErrorTracker()          # scored in the uFactory frame, against truth
+        c["err_diy"] = ErrorTracker()      # the honest torque number
     rows: list[list[float]] = []
     running = True
-    last_report = 0.0          # periodic terminal summary, for debugging without watching the window
+    last_report = 0.0
 
     while running:
         for event in pygame.event.get():
@@ -140,41 +139,37 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
                 if event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
-                    zero = hm.latest_channels.copy()
-                    zeroed = True
+                    zero = hm.latest_channels.copy(); zeroed = True
                     print(f"[zeroed] baseline = {np.round(zero[:4], 1)} ...")
-                    err_new.reset(); err_old.reset(); err_true.reset()
+                    for c in cals: c["err"].reset(); c["err_diy"].reset()
                 elif event.key == pygame.K_r:
-                    err_new.reset(); err_old.reset(); err_true.reset()
+                    for c in cals: c["err"].reset(); c["err_diy"].reset()
 
-        # Auto-zero on the first real serial frame so the display is never garbage.
-        # SPACE re-zeros at any time; do it once while genuinely unloaded.
         if not zeroed and np.any(hm.latest_channels):
-            zero = hm.latest_channels.copy()
-            zeroed = True
+            zero = hm.latest_channels.copy(); zeroed = True
             print(f"[auto-zeroed on first reading] baseline = {np.round(zero[:4], 1)} ...")
             print("  press SPACE while unloaded to re-zero if the sensor was loaded at startup")
 
         channels = hm.latest_channels - zero
         truth = uf.latest_ext
+        truth_diy = ufactory_to_diy_frame(truth[None, :])[0]
 
-        # New calibration predicts in the DIY frame -> bring it back to the uFactory
-        # frame so the comparison against the reference is like-for-like.
-        pred_new_diy = (channels @ A_new.T + b_new)[None, :]
-        pred_new = diy_to_ufactory_frame(pred_new_diy)[0]
-        pred_old = channels @ A_old.T + b_old if A_old is not None else np.zeros(6)
+        for c in cals:
+            pred = channels @ c["A"].T + c["b"]
+            # A calibration fitted in the DIY frame predicts there; rotate it into the
+            # uFactory frame so the bars compare like with like.
+            if c["frame"] == "diy":
+                c["pred_diy"] = pred
+                c["pred"] = diy_to_ufactory_frame(pred[None, :])[0]
+            else:
+                c["pred"] = pred
+                c["pred_diy"] = ufactory_to_diy_frame(pred[None, :])[0]
+            c["err"].add(c["pred"], truth)
+            c["err_diy"].add(truth_diy, c["pred_diy"])
 
-        err_new.add(pred_new, truth)
-        if A_old is not None:
-            err_old.add(pred_old, truth)
-        # Also track error in the DIY frame. Scoring in the uFactory frame FLATTERS the
-        # torque axes, because moving the frame re-introduces the d x F term -- which the
-        # model reproduces well simply by predicting force. Measured offline: mean R2 0.44
-        # in the DIY frame vs 0.55 in the uFactory frame on the same fit. The DIY-frame
-        # number is the sensor's true torque ability.
-        err_true.add(ufactory_to_diy_frame(truth[None, :])[0], pred_new_diy[0])
         if log_path is not None:
-            rows.append([time.time(), *uf.latest_raw, *truth, *hm.latest_channels, *pred_old, *pred_new])
+            rows.append([time.time(), *uf.latest_raw, *truth, *hm.latest_channels,
+                         *[v for c in cals for v in c["pred"]]])
 
         screen.fill((24, 24, 28))
         y = 16
@@ -189,76 +184,71 @@ def run(uf: UFactoryReader, hm: HomemadeReader, new_cal, old_cal,
             screen.blit(small.render("zeroed OK", True, (120, 200, 140)), (16, y))
         y += 30
 
-        screen.blit(small.render("        " + "".join(f"{a:>10}" for a in AXES), True, (150, 150, 150)), (238, y)); y += 22
+        screen.blit(small.render("        " + "".join(f"{a:>10}" for a in AXES),
+                                 True, (150, 150, 150)), (300, y)); y += 22
         y = draw_bar_row(screen, small, y, "uFactory raw", uf.latest_raw, (110, 110, 190))
         y = draw_bar_row(screen, small, y, "uFactory calibrated  <- truth", truth, (90, 200, 120))
-        y = draw_bar_row(screen, small, y, f"homemade {label_old}", pred_old, (200, 150, 80))
-        y = draw_bar_row(screen, small, y, f"homemade {label_new}", pred_new, (110, 190, 220))
+        for c in cals:
+            y = draw_bar_row(screen, small, y, c["name"], c["pred"], c["colour"])
 
         y += 6
-        rn, ro = err_new.rmse(), err_old.rmse()
-        screen.blit(font.render("Live error vs truth (RMSE, sliding window)", True, (230, 230, 230)), (16, y)); y += 30
-        for label, e, colour in ((label_old, ro, (200, 150, 80)), (label_new, rn, (110, 190, 220))):
-            screen.blit(small.render(label, True, colour), (16, y))
+        screen.blit(font.render("Live error vs truth (RMSE, sliding window)", True, (230, 230, 230)), (16, y)); y += 28
+        best = None
+        for c in cals:
+            e = c["err"].rmse()
+            screen.blit(small.render(c["name"], True, c["colour"]), (16, y))
             for i in range(6):
                 txt = "--" if np.isnan(e[i]) else f"{e[i]:6.2f}"
-                screen.blit(small.render(txt, True, colour), (250 + i * 70, y))
+                screen.blit(small.render(txt, True, c["colour"]), (300 + i * 62, y))
+            if not np.isnan(e).any():
+                score = float(np.nanmean(e))
+                if best is None or score < best[0]:
+                    best = (score, c["name"])
             y += 24
-        if not np.isnan(rn).any() and not np.isnan(ro).any():
-            better = int((rn < ro).sum())
-            msg = f"{label_new} better on {better}/6 axes"
-            screen.blit(font.render(msg, True, (90, 200, 120) if better >= 4 else (200, 150, 80)), (16, y))
-        y += 30
-        rt = err_true.rmse()
-        screen.blit(small.render(f"{label_new} (DIY frame)", True, (170, 170, 170)), (16, y))
-        for i in range(6):
-            txt = "--" if np.isnan(rt[i]) else f"{rt[i]:6.2f}"
-            screen.blit(small.render(txt, True, (170, 170, 170)), (250 + i * 70, y))
-        y += 22
-        screen.blit(small.render(
-            "^ the honest torque number -- the uFactory-frame rows above flatter torque",
-            True, (130, 130, 130)), (16, y))
+        if best is not None:
+            screen.blit(font.render(f"lowest mean RMSE: {best[1]}", True, (90, 200, 120)), (16, y))
         y += 30
 
-        screen.blit(small.render("homemade raw channels (zeroed)", True, (170, 170, 170)), (16, y)); y += 22
-        for r in range(4):
-            line = "  ".join(f"{i+1:2d}:{channels[i]:7.1f}" for i in range(r * 4, r * 4 + 4))
-            screen.blit(small.render(line, True, (185, 185, 185)), (16, y)); y += 21
-
-        # Print a summary every `report_every` seconds so a run leaves a readable trace
-        # in the terminal -- useful when the window is on another machine, or afterwards.
-        now = time.time()
-        if report_every and now - last_report >= report_every:
-            last_report = now
-            rn_, ro_, rt_ = err_new.rmse(), err_old.rmse(), err_true.rmse()
-            print(f"\n[{time.strftime('%H:%M:%S')}]  |F| applied = {np.linalg.norm(truth[:3]):.1f} N")
-            print("            " + "".join(f"{a:>9}" for a in AXES))
-            print("  truth     " + "".join(f"{v:9.2f}" for v in truth))
-            print(f"  {label_old:<9} " + "".join(f"{v:9.2f}" for v in pred_old))
-            print(f"  {label_new:<9} " + "".join(f"{v:9.2f}" for v in pred_new))
-            if not np.isnan(rn_).any():
-                print(f"  RMSE {label_old:<4} " + "".join(f"{v:9.2f}" for v in ro_))
-                print(f"  RMSE {label_new:<4} " + "".join(f"{v:9.2f}" for v in rn_))
-                print(f"  -> {label_new} better on {int((rn_ < ro_).sum())}/6 axes")
-                print("  RMSE NEW (DIY frame, honest torque)" + "".join(f"{v:8.2f}" for v in rt_))
+        screen.blit(small.render("DIY frame -- the honest torque number", True, (170, 170, 170)), (16, y)); y += 24
+        for c in cals:
+            e = c["err_diy"].rmse()
+            screen.blit(small.render(c["name"], True, c["colour"]), (16, y))
+            for i in range(6):
+                txt = "--" if np.isnan(e[i]) else f"{e[i]:6.2f}"
+                screen.blit(small.render(txt, True, c["colour"]), (300 + i * 62, y))
+            y += 24
 
         pygame.display.flip()
         clock.tick(30)
 
-    pygame.quit()
+        now = time.time()
+        if report_every > 0 and now - last_report >= report_every:
+            last_report = now
+            print(f"\n--- {time.strftime('%H:%M:%S')} ---")
+            print(f"  {'':<22}" + "".join(f"{a:>9}" for a in AXES))
+            print(f"  {'uFactory truth':<22}" + "".join(f"{v:9.2f}" for v in truth))
+            for c in cals:
+                print(f"  {c['name']:<22}" + "".join(f"{v:9.2f}" for v in c["pred"]))
+            print("  RMSE (uFactory frame)")
+            for c in cals:
+                e = c["err"].rmse()
+                if not np.isnan(e).any():
+                    print(f"    {c['name']:<20}" + "".join(f"{v:9.2f}" for v in e))
 
+    pygame.quit()
     if log_path is not None and rows:
-        import csv
-        cols = (["ts"] + [f"uf_raw_{a}" for a in AXES] + [f"uf_cal_{a}" for a in AXES]
-                + [f"ch{i+1}" for i in range(CHANNELS)]
-                + [f"old_{a}" for a in AXES] + [f"new_{a}" for a in AXES])
+        import csv as _csv
         with log_path.open("w", newline="") as fh:
-            w = csv.writer(fh); w.writerow(cols); w.writerows(rows)
+            w = _csv.writer(fh)
+            w.writerow(["ts"] + [f"uf_raw_{a}" for a in AXES] + [f"uf_cal_{a}" for a in AXES]
+                       + [f"ch{i}" for i in range(1, CHANNELS + 1)]
+                       + [f"{c['name'].replace(' ', '_')}_{a}" for c in cals for a in AXES])
+            w.writerows(rows)
         print(f"wrote {log_path} ({len(rows)} rows)")
 
 
-def compare_offline(data_dir: Path, new_cal, old_cal) -> None:
-    """Score both calibrations against the uFactory on already-recorded sessions.
+def compare_offline(data_dir: Path, cals: list[dict]) -> None:
+    """Score every calibration against the uFactory on already-recorded sessions.
 
     Needs no hardware, and uses far more data than you could push by hand -- so this is
     the definitive answer to "is the new calibration better", with the live view being
@@ -266,31 +256,22 @@ def compare_offline(data_dir: Path, new_cal, old_cal) -> None:
     """
     import session_data as sd
 
-    A_new, b_new = new_cal
     sessions = sd.load_all(data_dir, frame="diy")
     channels = np.vstack([s.channels for s in sessions])
     truth = sd.diy_to_ufactory_frame(np.vstack([s.wrench for s in sessions]))
-    pred_new = sd.diy_to_ufactory_frame(channels @ A_new.T + b_new)
-
-    def rmse(pred):
-        return np.sqrt(((pred - truth) ** 2).mean(axis=0))
-
-    r_new = rmse(pred_new)
     print(f"\n{len(channels):,} samples from {len(sessions)} sessions, scored against the uFactory\n")
-    if old_cal is None:
-        print(f"{'axis':>5} {'NEW RMSE':>12}")
-        for i, a in enumerate(AXES):
-            print(f"{a:>5} {r_new[i]:10.2f} {'N' if i < 3 else 'N*m'}")
-        return
-
-    A_old, b_old = old_cal
-    r_old = rmse(channels @ A_old.T + b_old)
-    print(f"{'axis':>5} {'OLD RMSE':>12} {'NEW RMSE':>12} {'improvement':>13}")
-    for i, a in enumerate(AXES):
-        unit = "N" if i < 3 else "N*m"
-        gain = (r_old[i] - r_new[i]) / r_old[i] * 100
-        print(f"{a:>5} {r_old[i]:10.2f} {unit:<3} {r_new[i]:10.2f} {unit:<3} {gain:+11.0f}%")
-    print(f"\nNEW better on {int((r_new < r_old).sum())}/6 axes")
+    print(f"  {'calibration':<24}" + "".join(f"{a:>9}" for a in AXES) + f"{'mean':>9}")
+    best = None
+    for c in cals:
+        pred = channels @ c["A"].T + c["b"]
+        if c["frame"] == "diy":
+            pred = sd.diy_to_ufactory_frame(pred)
+        r = np.sqrt(((pred - truth) ** 2).mean(axis=0))
+        print(f"  {c['name']:<24}" + "".join(f"{v:9.2f}" for v in r) + f"{r.mean():9.2f}")
+        if best is None or r.mean() < best[0]:
+            best = (r.mean(), c["name"])
+    print(f"\n  lowest mean RMSE: {best[1]}")
+    print("  (N for force rows, N*m for torque -- the mean mixes units, use it only to rank)")
 
 
 def main() -> None:
@@ -301,35 +282,44 @@ def main() -> None:
     p.add_argument("--data-dir", type=Path, default=Path("."), help="where the session CSVs live (offline mode)")
     p.add_argument("--homemade-port", default="/dev/ttyACM0")
     p.add_argument("--baud", type=int, default=115200)
-    p.add_argument("--new-cal", type=Path, default=Path("calibration_baseline.npz"))
-    p.add_argument("--old-cal", type=Path, default=None,
-                   help="a second calibration to compare against (optional)")
-    p.add_argument("--label-new", default="NEW cal", help="display label for --new-cal")
-    p.add_argument("--label-old", default="OLD cal", help="display label for --old-cal")
+    p.add_argument("--cal", action="append", default=[], metavar="LABEL=PATH",
+                   help="a calibration to show, repeatable. Frame is read from the file "
+                        "(defaults to diy for ours). e.g. --cal 'new ridge=calibration_newrun_ridge.npz'")
     p.add_argument("--log", type=Path, default=None, help="also record every frame to CSV")
     p.add_argument("--report-every", type=float, default=60.0,
                    help="seconds between terminal summaries (0 disables)")
     args = p.parse_args()
 
-    new_cal = load_matrix(args.new_cal)
-    print(f"new calibration: {args.new_cal}  A{new_cal[0].shape}")
-    old_cal = None
-    if args.old_cal:
-        old_cal = load_matrix(args.old_cal)
-        print(f"old calibration: {args.old_cal}  A{old_cal[0].shape}")
-        print("NOTE: the old calibration's frame convention is undocumented; it is shown")
-        print("      as-is and may differ from the uFactory frame by a rotation.")
+    if not args.cal:
+        raise SystemExit("pass at least one --cal 'LABEL=path.npz'")
+    palette = [(200, 150, 80), (110, 190, 220), (220, 130, 190), (150, 200, 120),
+               (230, 200, 110), (170, 150, 230)]
+    cals = []
+    for i, spec in enumerate(args.cal):
+        label, _, path = spec.partition("=")
+        if not path:
+            raise SystemExit(f"--cal needs LABEL=PATH, got {spec!r}")
+        A, b = load_matrix(Path(path))
+        frame = "diy"
+        if Path(path).suffix == ".npz":
+            d = np.load(path, allow_pickle=True)
+            if "frame" in d:
+                frame = str(d["frame"])
+        cals.append({"name": label, "A": A, "b": b, "frame": frame,
+                     "colour": palette[i % len(palette)]})
+        print(f"  {label:<24} {path}   A{A.shape}  frame={frame}")
 
     if args.offline:
-        compare_offline(args.data_dir, new_cal, old_cal)
+        compare_offline(args.data_dir, cals)
         return
     if not args.xarm_ip:
         raise SystemExit("--xarm-ip is required for the live view (or pass --offline)")
 
     print("\n" + "=" * 62)
     print("  LIVE CALIBRATION COMPARISON  (not the data collector)")
-    print("  You should see FOUR bar rows: uFactory raw, uFactory calibrated,")
-    print("  homemade OLD cal, homemade NEW cal.")
+    print(f"  {2 + len(cals)} bar rows: uFactory raw, uFactory calibrated, then:")
+    for c in cals:
+        print(f"    - {c['name']}")
     print("=" * 62)
 
     uf = UFactoryReader(args.xarm_ip)
@@ -337,7 +327,7 @@ def main() -> None:
     uf.start(); hm.start()
     print("Press SPACE once, unloaded, to zero the homemade sensor before comparing.")
     try:
-        run(uf, hm, new_cal, old_cal, args.log, args.report_every, args.label_new, args.label_old)
+        run(uf, hm, cals, args.log, args.report_every)
     finally:
         uf.stop(); hm.stop()
 
