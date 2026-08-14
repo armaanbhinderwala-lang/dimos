@@ -215,6 +215,7 @@ def compute_hybrid_twist(
     drive_direction_world: np.ndarray,
     cfg: AdmittanceConfig,
     measured_velocity_world: np.ndarray | None = None,
+    hinge_to_grasp_world: np.ndarray | None = None,
     progress_m: float = 0.0,
     singularity_scale: float = 1.0,
 ) -> TwistResult:
@@ -262,6 +263,17 @@ def compute_hybrid_twist(
         linear = speed * tangent
 
     omega = -cfg.k_rot * m_world
+    # Turn the gripper WITH the door. A body rotating about a hinge satisfies v = w x r, so
+    # w = (r x v) / |r|^2 -- exact, and the sign falls out of the geometry. A gripper that only
+    # translates along the arc makes the wrist absorb the whole rotation, which is what drove
+    # joint 5 into its limit at 45 degrees on hardware. Torque compliance cannot supply this:
+    # the moment is small, mostly inside the deadband, so omega stayed at zero all run.
+    if hinge_to_grasp_world is not None:
+        r = np.asarray(hinge_to_grasp_world, float)
+        r_sq = float(r @ r)
+        if r_sq > 1e-6:
+            omega = omega + np.cross(r, linear) / r_sq
+
     omega_norm = float(np.linalg.norm(omega))
     if omega_norm > cfg.max_rotation_rate:
         omega *= cfg.max_rotation_rate / omega_norm

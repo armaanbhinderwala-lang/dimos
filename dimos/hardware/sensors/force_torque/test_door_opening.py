@@ -349,3 +349,36 @@ def test_gravity_compensation_removes_a_rotating_tool_load():
         measured = tool_gravity_wrench(ee, mass, com)          # tool weight alone
         assert np.allclose(measured - tool_gravity_wrench(ee, mass, com), 0.0, atol=1e-12), \
             "compensation must cancel the tool exactly, in every orientation"
+
+
+def test_gripper_rotates_with_the_door():
+    """The 45-degree hardware stall: the gripper translated along the arc but never turned,
+    so the wrist absorbed the whole rotation and joint 5 hit its limit."""
+    cfg = AdmittanceConfig()
+    r = np.array([0.0, -0.30, 0.0])
+    vel = np.array([0.02, 0.0, 0.0])
+    res = compute_hybrid_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]),
+                               cfg, measured_velocity_world=vel, hinge_to_grasp_world=r)
+    assert np.linalg.norm(res.angular) > 0.01, "must rotate with the door"
+    assert np.allclose(np.cross(res.angular, r), res.linear, atol=1e-9), "v = w x r must hold"
+    assert np.isclose(np.linalg.norm(res.angular), np.linalg.norm(res.linear) / 0.30, atol=1e-9)
+
+
+def test_no_hinge_means_no_added_rotation():
+    """The probe runs before the hinge is known and must pull straight."""
+    cfg = AdmittanceConfig()
+    res = compute_hybrid_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]),
+                               cfg, measured_velocity_world=np.array([0.02, 0.0, 0.0]))
+    assert np.allclose(res.angular, 0.0)
+
+
+def test_rotation_reverses_with_travel_direction():
+    cfg = AdmittanceConfig()
+    r = np.array([0.0, -0.30, 0.0])
+    a = compute_hybrid_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]), cfg,
+                             measured_velocity_world=np.array([0.02, 0, 0]),
+                             hinge_to_grasp_world=r).angular
+    b = compute_hybrid_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([-1.0, 0, 0]), cfg,
+                             measured_velocity_world=np.array([-0.02, 0, 0]),
+                             hinge_to_grasp_world=r).angular
+    assert np.sign(a[2]) == -np.sign(b[2]), "reversing travel must reverse the rotation"

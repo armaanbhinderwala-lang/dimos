@@ -99,8 +99,15 @@ class FTAdaptivePullConfig(ModuleConfig):
     # Phase 1: probe. Short and a little brisker than the real pull -- just
     # enough motion to see what this door actually resists with.
     probe_speed: float = 0.04  # m/s
-    probe_distance_m: float = 0.04  # m -- stop the probe here even if never resisted
-    probe_max_duration: float = 5.0  # s, safety net independent of distance
+    # 8 cm, not 4: on a 0.30 m door 4 cm is only 7.6 degrees of arc, which constrains a circle
+    # far too weakly -- two hardware runs fitted radii of 0.274 m and 0.109 m for the same door.
+    probe_distance_m: float = 0.08  # m -- stop the probe here even if never resisted
+    probe_max_duration: float = 8.0  # s, safety net independent of distance
+
+    # A fitted radius outside this range is not believable for an appliance door; the pull
+    # proceeds without door-following rotation rather than turning on a bad number.
+    min_hinge_radius_m: float = 0.15
+    max_hinge_radius_m: float = 0.80
 
     # Phase 2: execute. Deliberately slow -- "human-like," not scaled by how
     # heavy the door is; the calibrated cutoffs below are what adapts to the
@@ -179,6 +186,8 @@ class FTAdaptivePullModule(Module):
     _lock: threading.Lock
     _latest_wrench: np.ndarray | None = None  # [Fx,Fy,Fz,Mx,My,Mz], tool frame
     _latest_q: np.ndarray | None = None
+    _hinge_centre: Any = None
+    _hinge_axis: Any = None
     _pin_model: Any = None
     _pin_data: Any = None
     _frame_id: int = -1
@@ -406,9 +415,13 @@ class FTAdaptivePullModule(Module):
             previous_position = position
 
             if self.config.use_hybrid_law:
+                # Known only after the probe, so the probe itself pulls straight and the
+                # execute phase follows the arc.
+                to_grasp = (None if self._hinge_centre is None
+                            else position - np.asarray(self._hinge_centre))
                 result = compute_hybrid_twist(
                     force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
-                    measured_velocity_world=velocity,
+                    measured_velocity_world=velocity, hinge_to_grasp_world=to_grasp,
                     progress_m=stats.distance_covered, singularity_scale=sing_scale,
                 )
             else:
@@ -477,6 +490,14 @@ class FTAdaptivePullModule(Module):
             logger.info("Arc check skipped: probe motion is not an arc (drawer, or too little travel).")
             return None
         hinge, axis, radius = fit
+        if not (self.config.min_hinge_radius_m <= radius <= self.config.max_hinge_radius_m):
+            logger.warning(
+                "Hinge radius %.3fm is outside the believable range %.2f-%.2fm -- ignoring the "
+                "fit. The pull will proceed without door-following rotation.",
+                radius, self.config.min_hinge_radius_m, self.config.max_hinge_radius_m,
+            )
+            return None
+        self._hinge_centre, self._hinge_axis = hinge, axis
 
         state = self._get_state()
         if state is None:
