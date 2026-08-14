@@ -79,6 +79,8 @@ all_blueprints = {
     "keyboard-teleop-xarm7": "dimos.robot.manipulators.xarm.blueprints.teleop:keyboard_teleop_xarm7",
     "keyboard-teleop-xarm7-ft": "dimos.robot.manipulators.xarm.blueprints.teleop_with_ft:keyboard_teleop_xarm7_ft",
     "keyboard-teleop-xarm7-ft-adaptive": "dimos.robot.manipulators.xarm.blueprints.teleop_with_ft:keyboard_teleop_xarm7_ft_adaptive",
+    "door-opener-xarm7": "dimos.robot.manipulators.xarm.blueprints.door_opener:door_opener_xarm7",
+    "door-opener-xarm7-diy": "dimos.robot.manipulators.xarm.blueprints.door_opener:door_opener_xarm7_diy",
     "learning-collect-quest-piper": "dimos.imitation.collection.blueprint:learning_collect_quest_piper",
     "learning-collect-quest-xarm7": "dimos.imitation.collection.blueprint:learning_collect_quest_xarm7",
     "mid360": "dimos.hardware.sensors.lidar.livox.livox_blueprints:mid360",

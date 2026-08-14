@@ -145,23 +145,16 @@ def slew_limit(prev: np.ndarray, target: np.ndarray, max_delta: float) -> np.nda
 
 
 def fit_hinge(points_world: np.ndarray) -> tuple[np.ndarray, np.ndarray, float] | None:
-    """Recover a door's hinge from where the gripper has actually been.
+    """Fit the door's circle from where the gripper has been: (centre, axis, radius).
 
-    The probe already moves the handle a few centimetres, and those points lie on the door's
-    circle whether anyone measured it or not. Fitting that circle gives hinge and radius with
-    no prior model, which is what lets the arc check work on an oven, a fridge or a microwave
-    without being told which it is.
-
-    Returns (centre, axis, radius), or None when the motion is too straight to call -- a
-    drawer, or a door that has barely moved, where any circle fit is numerical noise.
+    None when the motion is too straight to call -- a drawer, or too little travel.
     """
     pts = np.asarray(points_world, float)
     if len(pts) < 5:
         return None
     centroid = pts.mean(axis=0)
     centred = pts - centroid
-    # Motion plane = the two strongest singular directions; the weakest is its normal, which
-    # for a hinged door is the hinge axis.
+    # Weakest singular direction is the plane normal, i.e. the hinge axis.
     _, sing, vt = np.linalg.svd(centred, full_matrices=False)
     if sing[1] < 1e-12:
         return None
@@ -175,8 +168,7 @@ def fit_hinge(points_world: np.ndarray) -> tuple[np.ndarray, np.ndarray, float] 
     if radius_sq <= 0:
         return None
     radius = float(np.sqrt(radius_sq))
-    # Reject what the data cannot support: a nearly straight sweep "fits" a huge circle whose
-    # centre is meaningless. Demand visible curvature over the span actually travelled.
+    # A near-straight sweep "fits" a huge circle with a meaningless centre; demand curvature.
     span = float(np.linalg.norm(pts[-1] - pts[0]))
     if radius > 5.0 or span < 1e-9 or radius / span > 50.0:
         return None
@@ -190,22 +182,15 @@ def arc_waypoints(
     max_angle_rad: float,
     count: int = 10,
 ) -> np.ndarray:
-    """Where the handle will be, every step of the way to max_angle_rad.
-
-    A hinged door gives the gripper no choice: its path is a circle about the hinge. So the
-    whole trajectory is known the moment the hinge is, and whether the arm can follow it is
-    decided BEFORE the pull starts -- not something a controller can rescue halfway through.
-    Checking these points against the arm's reach and conditioning is what catches "opens to
-    50 degrees and jams" while there is still time to re-grasp somewhere better.
-    """
+    """Handle positions along the door's arc. Known once the hinge is, so reachability can be
+    checked before the pull rather than discovered halfway through it."""
     axis = np.asarray(hinge_axis_world, float)
     axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
     radial = np.asarray(grasp_world, float) - np.asarray(hinge_point_world, float)
-    radial = radial - np.dot(radial, axis) * axis            # drop any along-axis component
+    radial = radial - np.dot(radial, axis) * axis
     out = []
     for angle in np.linspace(0.0, max_angle_rad, count):
         cos_a, sin_a = np.cos(angle), np.sin(angle)
-        # Rodrigues, with radial already perpendicular to axis
         rotated = radial * cos_a + np.cross(axis, radial) * sin_a
         out.append(np.asarray(hinge_point_world, float) + rotated)
     return np.array(out)
@@ -221,20 +206,11 @@ def compute_hybrid_twist(
     progress_m: float = 0.0,
     singularity_scale: float = 1.0,
 ) -> TwistResult:
-    """Hybrid force/velocity control: velocity along the tangent, force along the radial.
+    """Velocity along the tangent, force regulated on the radial (Karayiannidis, IROS 2012).
 
-    compute_twist commands a VELOCITY in every direction, including the one the door
-    physically cannot move in, and leaves compliance to mop up the difference. Against a
-    stiff constraint that does not converge -- the unusable component becomes position error
-    every tick and force climbs without bound until a cutoff fires.
-
-    The standard fix (Karayiannidis et al., "Open Sesame!", IROS 2012) splits the two apart:
-    a door constrains exactly one direction, and the constraint force points along it, so the
-    measured force IS the radial estimate -- no hinge position, no radius, no door model.
-    Command velocity only along the tangent, and REGULATE force along the radial to a small
-    target instead of commanding motion into it. Wrong tangent guesses then cost a little
-    force rather than an unbounded one, which is what makes it work on a door whose geometry
-    you never measured.
+    compute_twist commands velocity in every direction including the constrained one, so the
+    unusable component becomes position error each tick and force climbs without bound. Here a
+    wrong tangent costs a little force instead. Needs no hinge, radius or door model.
     """
     if measured_velocity_world is None:
         measured_velocity_world = np.zeros(3)
@@ -249,20 +225,16 @@ def compute_hybrid_twist(
         progress_m, cfg.decel_start_m, cfg.decel_full_m, cfg.decel_floor_scale
     )
 
-    # Tangent comes from MOTION, not from force. The constraint permits exactly one direction,
-    # so whichever way the tool is actually travelling IS the tangent -- no door model needed.
-    # Taking it from the force instead fails at the worst moment: before the door breaks free
-    # the resistance is head-on, so force is antiparallel to the drive, the "tangent" cancels
-    # to zero and the robot stops pushing exactly when it needs to push.
+    # Tangent from motion, not force: before the door breaks free the resistance is head-on,
+    # so a force-derived tangent cancels to zero exactly when it needs to push.
     speed_now = float(np.linalg.norm(measured_velocity_world))
     if speed_now > cfg.min_motion_speed:
         tangent = measured_velocity_world / speed_now
     else:
         tangent = drive_direction_world / max(float(np.linalg.norm(drive_direction_world)), 1e-12)
 
-    # Radial load is whatever part of the force the tangent cannot account for. Friction acts
-    # along the tangent and is the price of moving; only the perpendicular part is the arm
-    # fighting the constraint, and only that part should be regulated away.
+    # Only the part of the force perpendicular to travel is fighting the constraint; the
+    # tangential part is friction, the price of moving.
     radial_force = f_world - np.dot(f_world, tangent) * tangent
     radial_mag = float(np.linalg.norm(radial_force))
     if radial_mag > cfg.contact_force_n:

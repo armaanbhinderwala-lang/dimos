@@ -40,12 +40,13 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dataclass_field, replace
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 import pinocchio
+from pydantic import Field
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
@@ -54,7 +55,10 @@ from dimos.hardware.sensors.force_torque.admittance_pull_law import (
     SENSOR_FORCE_OVERLOAD_N,
     SENSOR_TORQUE_OVERLOAD_NM,
     AdmittanceConfig,
+    arc_waypoints,
+    compute_hybrid_twist,
     compute_twist,
+    fit_hinge,
     singularity_speed_scale,
     slew_limit,
 )
@@ -112,6 +116,19 @@ class FTAdaptivePullConfig(ModuleConfig):
     execute_target_m: float = 0.8  # m
     max_duration: float = 30.0  # s, safety net for the execute phase
 
+    # Velocity on the tangent, force regulated on the radial. See compute_hybrid_twist.
+    use_hybrid_law: bool = True
+
+    # Checked between probe and execute: the probe's motion is what reveals the hinge.
+    check_arc_before_execute: bool = True
+    target_open_angle_deg: float = 90.0
+    arc_check_steps: int = 19
+    arc_min_sigma: float = 0.05          # manipulability floor along the arc
+    arc_min_margin_rad: float = 0.10     # joint-limit floor along the arc
+    arc_reach_tolerance_m: float = 0.005
+    # False by default: a partial open is usually still wanted, and the jam angle is logged.
+    refuse_if_arc_blocked: bool = False
+
     # Execute-phase cutoffs = max(probe_peak * cutoff_safety_margin, min_*) --
     # scales the safety envelope to what THIS door demonstrably needs instead
     # of one fixed guess. All four values here are starting points, not
@@ -134,6 +151,7 @@ class PhaseStats:
     safety_tripped: bool = False
     stop_reason: str = ""
     min_sigma: float = float("inf")  # smallest manipulability seen this phase
+    tool_path: list = dataclass_field(default_factory=list)  # EE positions, for fit_hinge
 
 
 class FTAdaptivePullModule(Module):
@@ -208,6 +226,46 @@ class FTAdaptivePullModule(Module):
         too_high = q >= self._q_upper - margin_rad
         hits = np.where(too_low | too_high)[0]
         return int(hits[0]) if len(hits) else None
+
+    def _ik_position(self, target: np.ndarray, seed: np.ndarray, iters: int = 120) -> np.ndarray:
+        """DLS IK, position only -- asking whether the arm can be near there at all, not
+        reproducing Pink. Demanding orientation would reject arcs the real solver can follow."""
+        q = seed.copy()
+        for _ in range(iters):
+            pose = self._forward_kinematics(q)
+            error = target - np.asarray(pose.translation)
+            if np.linalg.norm(error) < 1e-4:
+                break
+            pinocchio.computeJointJacobians(self._pin_model, self._pin_data, q)
+            jac = pinocchio.getFrameJacobian(
+                self._pin_model, self._pin_data, self._frame_id, pinocchio.LOCAL_WORLD_ALIGNED
+            )[:3]
+            u, s, vt = np.linalg.svd(jac, full_matrices=False)
+            q = np.clip(q + vt.T @ ((s / (s**2 + 0.01**2)) * (u.T @ error)),
+                        self._q_lower + 0.02, self._q_upper - 0.02)
+        return q
+
+    def _check_arc(self, q_now: np.ndarray, grasp: np.ndarray, hinge: np.ndarray,
+                   axis: np.ndarray, max_angle_rad: float) -> dict:
+        """Walk the whole arc before committing. Whether the arm can follow it is decided by
+        where it grabbed, so no controller rescues a grasp that runs out of travel at 50 deg."""
+        points = arc_waypoints(grasp, hinge, axis, max_angle_rad, self.config.arc_check_steps)
+        angles = np.degrees(np.linspace(0.0, max_angle_rad, self.config.arc_check_steps))
+        q = q_now.copy()
+        worst_sigma, worst_margin, blocked_at = np.inf, np.inf, None
+        for angle, point in zip(angles, points, strict=True):
+            q = self._ik_position(point, q)
+            reach_error = float(np.linalg.norm(point - np.asarray(self._forward_kinematics(q).translation)))
+            sigma = self._manipulability(q)
+            margin = float(min(np.min(q - self._q_lower), np.min(self._q_upper - q)))
+            worst_sigma, worst_margin = min(worst_sigma, sigma), min(worst_margin, margin)
+            if blocked_at is None and (
+                reach_error > self.config.arc_reach_tolerance_m
+                or sigma < self.config.arc_min_sigma
+                or margin < self.config.arc_min_margin_rad
+            ):
+                blocked_at = float(angle)
+        return {"worst_sigma": worst_sigma, "worst_margin": worst_margin, "blocked_at": blocked_at}
 
     def _manipulability(self, q: np.ndarray) -> float:
         """Smallest singular value of the tool-frame Jacobian -- backstop only, see AdmittanceConfig."""
@@ -286,6 +344,7 @@ class FTAdaptivePullModule(Module):
         dt = 1.0 / self.config.control_rate_hz
         start_time = time.time()
         prev_linear, prev_angular = np.zeros(3), np.zeros(3)
+        previous_position: np.ndarray | None = None
 
         while self._running and not self._stop_requested:
             if time.time() - start_time > max_duration:
@@ -324,10 +383,24 @@ class FTAdaptivePullModule(Module):
                 break
 
             drive_direction_world = ee_rot @ self._local_drive
-            result = compute_twist(
-                force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
-                progress_m=stats.distance_covered, singularity_scale=sing_scale,
-            )
+            # This path is what fit_hinge later reads the door's circle from.
+            position = np.asarray(pose.translation).copy()
+            stats.tool_path.append(position)
+            velocity = ((position - previous_position) / dt
+                        if previous_position is not None else np.zeros(3))
+            previous_position = position
+
+            if self.config.use_hybrid_law:
+                result = compute_hybrid_twist(
+                    force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
+                    measured_velocity_world=velocity,
+                    progress_m=stats.distance_covered, singularity_scale=sing_scale,
+                )
+            else:
+                result = compute_twist(
+                    force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
+                    progress_m=stats.distance_covered, singularity_scale=sing_scale,
+                )
 
             if result.safety_stop:
                 logger.warning(
@@ -376,6 +449,42 @@ class FTAdaptivePullModule(Module):
         )
         return stats
 
+    def _assess_arc(self, probe: PhaseStats) -> float | None:
+        """Fit the hinge from the probe's motion, then check the arc.
+
+        Returns the angle it expects to jam at, or None if the full swing is clear.
+        """
+        if len(probe.tool_path) < 5:
+            logger.info("Arc check skipped: probe recorded only %d points.", len(probe.tool_path))
+            return None
+        fit = fit_hinge(np.array(probe.tool_path))
+        if fit is None:
+            logger.info("Arc check skipped: probe motion is not an arc (drawer, or too little travel).")
+            return None
+        hinge, axis, radius = fit
+
+        state = self._get_state()
+        if state is None:
+            return None
+        _, q = state
+        grasp = np.asarray(self._forward_kinematics(q).translation)
+        result = self._check_arc(q, grasp, hinge, axis, np.radians(self.config.target_open_angle_deg))
+        logger.info(
+            "Hinge fitted: radius=%.3fm axis=%s. Arc to %.0f deg -> worst sigma %.4f, "
+            "worst joint margin %.3f rad.",
+            radius, np.round(axis, 3).tolist(), self.config.target_open_angle_deg,
+            result["worst_sigma"], result["worst_margin"],
+        )
+        if result["blocked_at"] is None:
+            logger.info("Arc is clear for the full %.0f degrees.", self.config.target_open_angle_deg)
+            return None
+        logger.warning(
+            "Arc is NOT clear: the arm runs out of reach or travel at about %.0f degrees "
+            "of %.0f. Expect the pull to stall there.",
+            result["blocked_at"], self.config.target_open_angle_deg,
+        )
+        return float(result["blocked_at"])
+
     async def _pull_loop(self) -> None:
         state = self._get_state()
         if state is None:
@@ -398,6 +507,18 @@ class FTAdaptivePullModule(Module):
             decel_full_m=self.config.probe_distance_m,
         )
         probe = await self._run_phase("probe", probe_cfg, self.config.probe_distance_m, self.config.probe_max_duration)
+
+        arc_blocked_at = None
+        if (self._running and not self._stop_requested and not probe.safety_tripped
+                and self.config.check_arc_before_execute):
+            arc_blocked_at = self._assess_arc(probe)
+            if arc_blocked_at is not None and self.config.refuse_if_arc_blocked:
+                logger.warning(
+                    "Refusing to execute: the arm cannot follow this door past %.0f degrees "
+                    "from where it is holding. Re-grasp or reposition, then retry.",
+                    arc_blocked_at,
+                )
+                self._running = False
 
         if self._running and not self._stop_requested and not probe.safety_tripped:
             # Clamped below the sensor's own hardware overload rating (see admittance_pull_law.py)
