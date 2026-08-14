@@ -344,6 +344,26 @@ class HomemadeReader:
             self._serial.close()
 
 
+class NullHomemadeReader:
+    """Stands in when the DIY sensor is not attached: uFactory-only recording.
+
+    Publishes zeros so the UI still draws, and logs NOTHING -- an empty homemade_raw table
+    is the honest record that no such sensor was present, and it makes session_data refuse
+    to load the run for calibration rather than fitting against fabricated zeros.
+    """
+
+    latest_channels = np.zeros(CHANNELS)
+    latest_cal = np.zeros(6)
+
+    def start(self) -> None:
+        logger_msg = ("Running WITHOUT the homemade sensor -- uFactory only. "
+                      "This recording cannot be used to fit a calibration.")
+        print(logger_msg)
+
+    def stop(self) -> None:
+        pass
+
+
 SAMPLE_TABLES = ("ufactory_raw", "ufactory_calibrated", "homemade_raw", "homemade_calibrated")
 
 
@@ -716,6 +736,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--xarm-ip")
     p.add_argument("--homemade-port", default="/dev/ttyACM0")
+    p.add_argument("--no-homemade", action="store_true",
+                   help="record the uFactory only, with no DIY sensor attached")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--calibration", type=Path, default=None, help="existing ft_calibration.json for the live homemade preview (optional)")
     p.add_argument("--db", type=Path, default=None, help="defaults to ft_calibration_session_<timestamp>.db")
@@ -776,7 +798,7 @@ def main() -> None:
     log = ExperimentLog(db_path, session_type=args.session_type)
     log.set_metadata(
         xarm_ip=args.xarm_ip,
-        homemade_port=args.homemade_port,
+        homemade_port=("none" if args.no_homemade else args.homemade_port),
         baud=args.baud,
         calibration_file=str(args.calibration) if args.calibration else "",
         session_type=args.session_type,
@@ -786,7 +808,8 @@ def main() -> None:
     print(f"Logging to {db_path} (session_type={args.session_type})")
 
     ufactory = UFactoryReader(args.xarm_ip, log)
-    homemade = HomemadeReader(args.homemade_port, args.baud, log, args.calibration)
+    homemade = (NullHomemadeReader() if args.no_homemade
+                else HomemadeReader(args.homemade_port, args.baud, log, args.calibration))
 
     ufactory.start()
     homemade.start()
