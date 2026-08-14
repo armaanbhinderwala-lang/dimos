@@ -113,12 +113,15 @@ def test_already_compensated_source_is_not_compensated_twice():
 
 
 def test_deadband_gates_noise_exactly_to_zero():
+    """Stated relative to the profile, so retuning the floor cannot silently break the test."""
     p = PROFILES["diy"]
-    gated = deadband(np.array([1.0, -1.2, 0.9, 0.05, -0.08, 0.02]),
-                     p.force_deadband_n, p.torque_deadband_nm)
-    assert np.allclose(gated, 0.0), "near-zero must be exactly zero, or the arm creeps"
-    kept = deadband(np.array([8.0, 0, 0, 0.5, 0, 0]), p.force_deadband_n, p.torque_deadband_nm)
-    assert np.isclose(kept[0], 8.0) and np.isclose(kept[3], 0.5)
+    below = np.array([p.force_deadband_n * 0.5, -p.force_deadband_n * 0.9, 0.0,
+                      p.torque_deadband_nm * 0.5, -p.torque_deadband_nm * 0.9, 0.0])
+    assert np.allclose(deadband(below, p.force_deadband_n, p.torque_deadband_nm), 0.0), \
+        "sub-threshold must be exactly zero, or the arm creeps in free air"
+    above = np.array([p.force_deadband_n * 3, 0, 0, p.torque_deadband_nm * 3, 0, 0])
+    kept = deadband(above, p.force_deadband_n, p.torque_deadband_nm)
+    assert np.isclose(kept[0], above[0]) and np.isclose(kept[3], above[3])
 
 
 def test_ema_starts_at_the_signal_and_blunts_spikes():
@@ -289,13 +292,25 @@ def test_deadband_must_exceed_sensor_noise():
     0.13 Nm through a 0.10 Nm gate. On hardware, measure the resting noise per axis and set
     the deadband above it, or the arm creeps with nothing touching it.
     """
-    c = WrenchConditioner(PROFILES["diy"])
+    p = PROFILES["diy"]
+    c = WrenchConditioner(p)
     rng = np.random.default_rng(1)
     c.begin_tare()
     for _ in range(50):
         c.apply(np.zeros(6))
+    # Noise deliberately well ABOVE the gate: it must leak, which is why the gate has to be
+    # set from measured noise rather than guessed.
+    scale = np.r_[np.full(3, p.force_deadband_n * 2), np.full(3, p.torque_deadband_nm * 2)]
     leaked = np.zeros(6, dtype=bool)
-    for _ in range(200):
-        out = c.apply(rng.normal(0, np.array([0.4, 0.4, 0.4, 0.4, 0.4, 0.4])))
-        leaked |= np.abs(out) > 0
-    assert leaked[3:].any(), "torque noise above the gate is expected to leak -- see docstring"
+    for _ in range(300):
+        leaked |= np.abs(c.apply(rng.normal(0, scale))) > 0
+    assert leaked.any(), "noise above the gate must leak -- see docstring"
+
+    # And noise comfortably below it must not.
+    c2 = WrenchConditioner(p)
+    c2.begin_tare()
+    for _ in range(50):
+        c2.apply(np.zeros(6))
+    small = np.r_[np.full(3, p.force_deadband_n * 0.1), np.full(3, p.torque_deadband_nm * 0.1)]
+    for _ in range(300):
+        assert np.allclose(c2.apply(rng.normal(0, small)), 0.0), "sub-gate noise must stay gated"

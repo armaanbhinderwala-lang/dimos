@@ -32,16 +32,24 @@ GRAVITY_M_S2 = 9.80665
 
 @dataclass
 class ConditioningProfile:
-    ema_alpha: float                 # 1.0 = no smoothing
+    """Force and torque get separate smoothing: measured on the DIY sensor, force noise is
+    real low-frequency motion that filtering cannot remove (alpha below 0.5 made it WORSE
+    while adding lag), whereas torque noise is genuine and halves under smoothing."""
+
+    ema_alpha: float                 # force channels; 1.0 = no smoothing
     force_deadband_n: float
     torque_deadband_nm: float
+    ema_alpha_torque: float | None = None   # defaults to ema_alpha when unset
     tool_mass_kg: float = 0.0
     tool_com_m: np.ndarray = field(default_factory=lambda: np.zeros(3))
     already_gravity_compensated: bool = False
 
 
 PROFILES: dict[str, ConditioningProfile] = {
-    "diy": ConditioningProfile(ema_alpha=0.10, force_deadband_n=1.5, torque_deadband_nm=0.1),
+    # Measured from a 3,233-frame live recording: 3-sigma detectable change is 6.4/5.2/7.4 N
+    # and 0.67/0.69/0.32 N*m. Deadbands sit at that floor so the arm cannot creep on noise.
+    "diy": ConditioningProfile(ema_alpha=0.50, ema_alpha_torque=0.15,
+                               force_deadband_n=7.4, torque_deadband_nm=0.69),
     "factory": ConditioningProfile(ema_alpha=0.35, force_deadband_n=0.5, torque_deadband_nm=0.03,
                                    already_gravity_compensated=True),
 }
@@ -106,6 +114,12 @@ class WrenchConditioner:
                 and self.profile.tool_mass_kg > 0.0 and ee_rot is not None):
             wrench = wrench - tool_gravity_wrench(ee_rot, self.profile.tool_mass_kg,
                                                   self.profile.tool_com_m)
-        self._filtered = ema(self._filtered, wrench, self.profile.ema_alpha)
+        alpha_t = (self.profile.ema_alpha if self.profile.ema_alpha_torque is None
+                   else self.profile.ema_alpha_torque)
+        prev = self._filtered
+        self._filtered = np.hstack([
+            ema(None if prev is None else prev[:3], wrench[:3], self.profile.ema_alpha),
+            ema(None if prev is None else prev[3:], wrench[3:], alpha_t),
+        ])
         return deadband(self._filtered, self.profile.force_deadband_n,
                         self.profile.torque_deadband_nm)

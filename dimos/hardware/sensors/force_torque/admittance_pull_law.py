@@ -59,9 +59,12 @@ SENSOR_TORQUE_OVERLOAD_NM = 6.0  # 4N*m rated x 1.5, same on all three torque ax
 class AdmittanceConfig:
     drive_speed: float = 0.03  # m/s, base speed along the drive direction when unresisted
     k_trans: float = 0.003  # (m/s)/N, lateral compliance gain -- UNVERIFIED, retune after first real pull
-    k_rot: float = 0.05  # (rad/s)/(N*m), rotational compliance gain -- UNVERIFIED, retune after first real pull
-    max_lateral_speed: float = 0.06  # m/s cap on the compliant (non-drive) linear velocity
-    max_rotation_rate: float = 0.35  # rad/s cap (~20 deg/s)
+    # 0.01, not 0.05: on the DIY sensor the smallest trustworthy torque change is ~0.7 N*m
+    # (measured), so a high gain turns sensor noise into wrist motion. Torque steers coarsely
+    # here; force does the work.
+    k_rot: float = 0.01  # (rad/s)/(N*m)
+    max_lateral_speed: float = 0.03  # m/s -- half the drive speed, so compliance cannot dominate
+    max_rotation_rate: float = 0.15  # rad/s (~9 deg/s) -- smoothness over responsiveness
     force_cutoff: float = 80.0  # N, total force magnitude -- comfortably under SENSOR_FORCE_OVERLOAD_N
     torque_cutoff: float = 4.5  # N*m -- was 15.0, ABOVE the sensor's real ~6N*m overload rating; grounded in the datasheet now
     # (resistance_force upper bound N, speed multiplier) -- max capped at 1.0, unlike Yashas's original
@@ -92,8 +95,10 @@ class AdmittanceConfig:
     # instantly, whatever caused the discontinuity (sensor glitch, a real force
     # snag, a singularity). Applied by the module (see slew_limit), not here --
     # needs cross-tick state this pure function doesn't keep.
-    max_linear_accel: float = 0.5  # m/s^2, UNVERIFIED
-    max_angular_accel: float = 3.0  # rad/s^2, UNVERIFIED
+    # Tightened for smoothness: with a 6 N noise floor the commanded twist jitters, and the
+    # slew limit is what stops that reaching the joints as visible judder.
+    max_linear_accel: float = 0.15  # m/s^2
+    max_angular_accel: float = 0.5  # rad/s^2
 
     # Manipulability (smallest singular value of the tool Jacobian) below which speed
     # tapers off, reaching zero at singularity_sigma_stop -- see _singularity_speed_scale.
