@@ -104,6 +104,15 @@ class AdmittanceConfig:
     singularity_sigma_caution: float = 0.05
     singularity_sigma_stop: float = 0.01
 
+    # How fast the drive direction chases measured velocity (see steer_drive_direction).
+    # DEFAULT 0.0 -- OFF, because measurement says it does not help. The tool's -Z already
+    # tracks the door's opening tangent at 0.99 alignment from the first tick, so there is
+    # almost nothing for steering to correct; enabling it scored 21-27 deg against 27 deg
+    # fixed. Kept because it is the right mechanism for a door whose arc the initial guess
+    # does NOT already match (a side-hinged fridge approached head-on, say), but it is not
+    # the fix for the stall we are chasing.
+    drive_steer_blend: float = 0.0
+
 
 @dataclass
 class TwistResult:
@@ -127,6 +136,36 @@ def slew_limit(prev: np.ndarray, target: np.ndarray, max_delta: float) -> np.nda
     if norm <= max_delta or norm < 1e-12:
         return target
     return prev + delta * (max_delta / norm)
+
+
+def steer_drive_direction(
+    drive_direction_world: np.ndarray,
+    measured_velocity_world: np.ndarray,
+    blend: float,
+    min_speed: float = 0.002,
+) -> np.ndarray:
+    """Turn the drive direction toward the direction the tool is ACTUALLY travelling.
+
+    A fixed drive direction is only correct for a straight pull. A hinged door moves its
+    handle along an arc, so the direction that makes progress rotates continuously; holding
+    the original one means an ever-growing share of the command pushes into the constraint
+    rather than along it, and that shows up as rising force with the door barely moving.
+
+    Steering toward measured velocity needs no hinge axis, no radius and no per-door config:
+    the constraint itself decides which way the tool can go, and the command follows. A
+    drawer moves in a straight line and this leaves the direction alone; a door curves and
+    the direction curves with it. Below min_speed there is no reliable direction to read, so
+    the current one is kept rather than chasing noise.
+    """
+    speed = float(np.linalg.norm(measured_velocity_world))
+    if speed < min_speed:
+        return drive_direction_world
+    target = measured_velocity_world / speed
+    blended = drive_direction_world + blend * (target - drive_direction_world)
+    norm = float(np.linalg.norm(blended))
+    if norm < 1e-9:
+        return drive_direction_world
+    return blended / norm
 
 
 def _speed_scale(resistance_force: float, bands: list[tuple[float, float]]) -> float:
