@@ -345,6 +345,40 @@ class FTAdaptivePullModule(Module):
             dx * 100, dy * 100, np.degrees(max_angle_rad),
         )
 
+    def _precheck_arc(self) -> None:
+        """Report reachability before the probe moves anything.
+
+        The arc only needs the grasp pose and the door radius, both known the moment the
+        gripper closes. Which side the hinge is on is not known yet, so check both -- if
+        neither clears, the grasp is wrong whichever way the door swings.
+        """
+        if not self.config.door_radius_m:
+            return
+        state = self._get_state()
+        if state is None:
+            return
+        _, q = state
+        pose = self._forward_kinematics(q)
+        grasp = np.asarray(pose.translation)
+        axis = np.asarray(self.config.hinge_axis_world, float)
+        axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+        drive = np.asarray(pose.rotation) @ self._local_drive
+        drive = drive - np.dot(drive, axis) * axis
+        if np.linalg.norm(drive) < 1e-6:
+            return
+        side = np.cross(axis, drive / np.linalg.norm(drive))
+        target = np.radians(self.config.target_open_angle_deg)
+        for sign, label in ((1.0, "one side"), (-1.0, "the other")):
+            hinge = grasp + sign * side * self.config.door_radius_m
+            r = self._check_arc(q, grasp, hinge, axis, target)
+            if r["blocked_at"] is None:
+                logger.info("Pre-check: hinge on %s -> full %.0f deg is reachable.",
+                            label, self.config.target_open_angle_deg)
+            else:
+                logger.warning("Pre-check: hinge on %s -> stalls at %.0f of %.0f deg.",
+                               label, r["blocked_at"], self.config.target_open_angle_deg)
+                self._suggest_reposition(q, grasp, hinge, axis, target)
+
     def _manipulability(self, q: np.ndarray) -> float:
         """Smallest singular value of the tool-frame Jacobian -- backstop only, see AdmittanceConfig."""
         pinocchio.computeJointJacobians(self._pin_model, self._pin_data, q)
@@ -757,6 +791,7 @@ class FTAdaptivePullModule(Module):
             base = replace(self.config.admittance,
                        force_axis_weights=self.config.force_axis_weights)
 
+            self._precheck_arc()
             logger.info("Probing door: speed=%.3fm/s over up to %.2fcm", self.config.probe_speed, self.config.probe_distance_m * 100)
             probe_cfg = replace(
                 base,
