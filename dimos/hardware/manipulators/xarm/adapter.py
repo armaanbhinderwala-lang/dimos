@@ -41,10 +41,10 @@ MAX_CARTESIAN_SPEED_MM = 500.0  # Max cartesian speed in mm/s
 _XARM_LIFECYCLE_SPEED_DEG = 20.0
 _XARM_LIFECYCLE_ACCEL_DEG = 500.0
 _XARM6_INITIAL_JOINTS_DEG = [0.0, -40.0, -50.0, 0.0, 90.0, 0.0]
-# joint5 is +-178.2 deg and a pull rolls it; starting near 180 left 3 deg of room, so keep it
-# at 0. Tool pitch is j2+j6 when j4=0, and j6 self-collides past 30 deg, so j2 carries all of
-# it: -90 + 0 aims the tool along -X with every joint clear of a stop.
-_XARM7_INITIAL_JOINTS_DEG = [0.0, -90.0, 0.0, 0.0, 0.0, 0.0, 20.0]
+# dimos builds the URDF with limited:=true, so the ranges are NOT the xarm defaults:
+# j1/j3/j5/j7 +-178.2, j2 +-124.9, j4 -6.3..178.2, j6 -100.3..178.2. j4's centre is 86 deg,
+# not 0 -- every joint here sits >90 deg from a stop, against a 5.7 deg guard.
+_XARM7_INITIAL_JOINTS_DEG = [0.0, -6.5, 0.0, 85.0, 0.0, 0.0, 20.0]
 
 # XArm mode codes
 _XARM_MODE_POSITION = 0
