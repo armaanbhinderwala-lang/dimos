@@ -84,7 +84,14 @@ def _build(sensor_module, profile: str, tool_mass_kg: float,
             tasks=[
                 # No gripper params here on purpose: they make eef_twist claim the gripper and
                 # hold it open every tick, which overrides the one-shot [ and ] key commands.
-                eef_twist_task(hardware, robot_model=control_model, timeout=0.0),
+                # 7 joints track a 6-DOF twist, so one DOF is spare. Unused it lets a single
+                # joint walk into its stop at ~60 deg of arc. posture_cost holds a fixed
+                # reference posture and fights the redistribution, so hand the nullspace to
+                # joint centering instead: it targets the middle of each range, and joint6's
+                # middle is +39 deg, away from the -100.3 stop that keeps ending the pull.
+                eef_twist_task(hardware, robot_model=control_model, timeout=0.0,
+                               control_ik={"posture_cost": 0.0,
+                                           "joint_centering_cost": 1e-2}),
                 # [ and ] publish a JointState on joint_command, and routing delivers that
                 # only to `servo` tasks. Without this the gripper keys do nothing.
                 TaskConfig(
