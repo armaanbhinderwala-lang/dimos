@@ -102,6 +102,7 @@ class FTAdaptivePullConfig(ModuleConfig):
     # 8 cm, not 4: on a 0.30 m door 4 cm is only 7.6 degrees of arc, which constrains a circle
     # far too weakly -- two hardware runs fitted radii of 0.274 m and 0.109 m for the same door.
     probe_distance_m: float = 0.08  # m -- stop the probe here even if never resisted
+    probe_min_ticks: int = 20  # enough force samples to average before trusting the direction
     probe_max_duration: float = 8.0  # s, safety net independent of distance
 
     # A fitted radius outside this range is not believable for an appliance door; the pull
@@ -402,6 +403,15 @@ class FTAdaptivePullModule(Module):
             if stats.distance_covered >= max_progress_m:
                 stats.stop_reason = "reached target"
                 break
+            # The probe exists only to read which way the door resists. Once that force is
+            # clear, every further centimetre of straight pull is fighting the hinge for
+            # nothing -- force has been running to 75N by 6cm.
+            if (name == "probe" and stats.ticks >= self.config.probe_min_ticks
+                    and self._hinge_direction_from_force(stats) is not None):
+                stats.stop_reason = "constraint force resolved"
+                logger.info("[%s] Constraint direction resolved after %.1fcm -- probe done.",
+                            name, stats.distance_covered * 100)
+                break
             if (name == "execute" and self._hinge_centre is not None
                     and self._swept_angle_deg(stats.tool_path) >= self.config.target_open_angle_deg):
                 stats.stop_reason = f"reached {self.config.target_open_angle_deg:.0f} deg"
@@ -554,14 +564,10 @@ class FTAdaptivePullModule(Module):
         force = np.asarray(probe.force_world_sum, float) / probe.ticks
         force = force - np.dot(force, axis) * axis
         if np.linalg.norm(travel) < 1e-6 or np.linalg.norm(force) < self.config.min_hinge_force_n:
-            logger.info("Constraint force %.1fN is too small to locate the hinge.",
-                        float(np.linalg.norm(force)))
             return None
         t_hat = travel / np.linalg.norm(travel)
         radial = force - np.dot(force, t_hat) * t_hat
         if np.linalg.norm(radial) < self.config.min_hinge_force_n:
-            logger.info("Radial force %.1fN is too small to locate the hinge.",
-                        float(np.linalg.norm(radial)))
             return None
         return radial / np.linalg.norm(radial)
 
