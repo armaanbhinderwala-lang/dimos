@@ -109,7 +109,7 @@ class FTAdaptivePullConfig(ModuleConfig):
     # slide and turn in the jaws and the door takes its own path while the arm keeps driving.
     # 0.0 is shut, 1.0 is wide -- keep this small or the handle is dropped.
     grip_release_angle_deg: float = 50.0
-    grip_release_position: float = 0.30
+    grip_release_position: float = 0.15
     grip_joint_name: str = "arm/gripper"
     # Force and torque cutoffs, both the reactive one and the fast-path sensor trip. Off means
     # nothing stops the pull on load -- the sensor's own rating still applies in hardware.
