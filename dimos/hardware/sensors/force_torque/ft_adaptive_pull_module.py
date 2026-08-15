@@ -344,8 +344,15 @@ class FTAdaptivePullModule(Module):
         side = np.cross(axis, drive / np.linalg.norm(drive))
         target = np.radians(self.config.target_open_angle_deg)
         for sign, label in ((1.0, "hinge one side"), (-1.0, "hinge other side")):
-            r = self._check_arc(q, grasp, grasp + sign * side * self.config.door_radius_m,
-                                axis, target)
+            hinge = grasp + sign * side * self.config.door_radius_m
+            rad = grasp - hinge
+            rad = rad - np.dot(rad, axis) * axis
+            ax = axis
+            if np.linalg.norm(rad) > 1e-9:
+                t = np.cross(ax, rad / np.linalg.norm(rad))
+                if float(np.dot(t, drive)) < 0.0:
+                    ax = -ax
+            r = self._check_arc(q, grasp, hinge, ax, target)
             if r["blocked_at"] is None:
                 logger.info("PRE-CHECK %s: full %.0f deg REACHABLE (worst sigma %.4f).",
                             label, self.config.target_open_angle_deg, r["worst_sigma"])
@@ -679,6 +686,17 @@ class FTAdaptivePullModule(Module):
                 _, q = state
                 grasp = np.asarray(self._forward_kinematics(q).translation)
                 hinge = grasp + d / np.linalg.norm(d) * self.config.door_radius_m
+                # Point the axis along the OPENING sense. arc_waypoints sweeps +angle about it,
+                # and the control law picks the tangent that agrees with the tool's pull axis;
+                # if these disagree the check walks the door the wrong way, straight out of
+                # reach, and reports a stall for an arc we would never drive.
+                r = grasp - hinge
+                r = r - np.dot(r, axis) * axis
+                drive = np.asarray(self._forward_kinematics(q).rotation) @ self._local_drive
+                if np.linalg.norm(r) > 1e-9:
+                    t = np.cross(axis, r / np.linalg.norm(r))
+                    if float(np.dot(t, drive)) < 0.0:
+                        axis = -axis
                 self._hinge_centre, self._hinge_axis = hinge, axis
                 result = self._check_arc(q, grasp, hinge, axis,
                                          np.radians(self.config.target_open_angle_deg))
