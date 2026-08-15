@@ -49,7 +49,7 @@ _ft_transports = {
 
 
 # Hinge-to-handle distance of the door being opened. Measure it; the probe cannot.
-DOOR_RADIUS_M = 0.30
+DOOR_RADIUS_M = 0.368  # 14.5 in, hinge pin to handle
 
 
 def _build(sensor_module, profile: str, tool_mass_kg: float,

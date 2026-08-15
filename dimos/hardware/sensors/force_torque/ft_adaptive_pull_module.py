@@ -123,6 +123,8 @@ class FTAdaptivePullConfig(ModuleConfig):
     # Ease following in over this much travel. Distance, not swept angle: gating on arc was a
     # deadlock, since the arc only appears once following is already on.
     follow_ramp_m: float = 0.02
+    # Accept the fitted hinge direction only this close to perpendicular (cos of the angle off).
+    max_hinge_direction_cos: float = 0.5
 
     # Phase 2: execute. Deliberately slow -- "human-like," not scaled by how
     # heavy the door is; the calibrated cutoffs below are what adapts to the
@@ -562,22 +564,37 @@ class FTAdaptivePullModule(Module):
             logger.info("Arc check skipped: probe motion is not an arc (drawer, or too little travel).")
             return None
         hinge, axis, radius = fit
-        if not (self.config.min_hinge_radius_m <= radius <= self.config.max_hinge_radius_m):
+        if self.config.door_radius_m:
+            # The fitted radius is discarded, so gate on what is actually used: the direction
+            # from grasp to hinge, which must be roughly perpendicular to the way we travelled.
+            grasp0 = np.asarray(probe.tool_path[-1], float)
+            travel = grasp0 - np.asarray(probe.tool_path[0], float)
+            radial = grasp0 - hinge
+            radial -= np.dot(radial, axis) * axis
+            travel -= np.dot(travel, axis) * axis
+            if np.linalg.norm(radial) < 1e-6 or np.linalg.norm(travel) < 1e-6:
+                logger.warning("Probe gives no usable hinge direction -- no door-following.")
+                return None
+            r_hat = radial / np.linalg.norm(radial)
+            off = abs(float(np.dot(r_hat, travel / np.linalg.norm(travel))))
+            if off > self.config.max_hinge_direction_cos:
+                logger.warning(
+                    "Hinge direction is %.0f deg from perpendicular to travel -- too far off to "
+                    "trust, no door-following.", np.degrees(np.arcsin(min(off, 1.0))),
+                )
+                return None
+            hinge = grasp0 - r_hat * self.config.door_radius_m
+            logger.info("Probe radius %.3fm replaced with the measured %.3fm (direction kept, "
+                        "%.0f deg off perpendicular).", radius, self.config.door_radius_m,
+                        np.degrees(np.arcsin(off)))
+            radius = self.config.door_radius_m
+        elif not (self.config.min_hinge_radius_m <= radius <= self.config.max_hinge_radius_m):
             logger.warning(
                 "Hinge radius %.3fm is outside the believable range %.2f-%.2fm -- ignoring the "
                 "fit. The pull will proceed without door-following rotation.",
                 radius, self.config.min_hinge_radius_m, self.config.max_hinge_radius_m,
             )
             return None
-        if self.config.door_radius_m:
-            grasp0 = np.asarray(probe.tool_path[-1], float)
-            radial = grasp0 - hinge
-            radial -= np.dot(radial, axis) * axis
-            if np.linalg.norm(radial) > 1e-6:
-                hinge = grasp0 - radial / np.linalg.norm(radial) * self.config.door_radius_m
-                logger.info("Hinge radius %.3fm from the probe replaced with the measured %.3fm.",
-                            radius, self.config.door_radius_m)
-                radius = self.config.door_radius_m
         self._hinge_centre, self._hinge_axis = hinge, axis
 
         state = self._get_state()
