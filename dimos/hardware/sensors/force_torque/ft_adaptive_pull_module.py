@@ -119,6 +119,8 @@ class FTAdaptivePullConfig(ModuleConfig):
     # low, which commands 1.41x too much rotation -- the gripper out-turns the door, twists the
     # grasp and pushes it shut. By 25 degrees the fit is within 5%.
     min_arc_for_following_deg: float = 25.0
+    # Ramp to full following over this much further arc, so it eases in rather than steps on.
+    follow_ramp_deg: float = 15.0
 
     # Phase 2: execute. Deliberately slow -- "human-like," not scaled by how
     # heavy the door is; the calibrated cutoffs below are what adapts to the
@@ -438,14 +440,16 @@ class FTAdaptivePullModule(Module):
                         and stats.ticks and stats.ticks % self.config.refit_hinge_every_ticks == 0):
                     self._refit_hinge(stats.tool_path)
                 swept = self._swept_angle_deg(stats.tool_path)
-                # Hold off until the fit has enough arc behind it -- over-rotating is what
-                # shut the door, and under-rotating merely loads the wrist a little.
+                # Ease following in once the fit has enough arc behind it. Over-rotating is
+                # what shut the door; under-rotating merely loads the wrist a little.
+                follow = np.clip((swept - self.config.min_arc_for_following_deg)
+                                 / max(self.config.follow_ramp_deg, 1e-6), 0.0, 1.0)
                 to_grasp = (position - np.asarray(self._hinge_centre)
-                            if self._hinge_centre is not None
-                            and swept >= self.config.min_arc_for_following_deg else None)
+                            if self._hinge_centre is not None and follow > 0.0 else None)
                 result = compute_hybrid_twist(
                     force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
                     measured_velocity_world=velocity, hinge_to_grasp_world=to_grasp,
+                    follow_scale=float(follow),
                     progress_m=stats.distance_covered, singularity_scale=sing_scale,
                 )
             else:

@@ -219,6 +219,7 @@ def compute_hybrid_twist(
     cfg: AdmittanceConfig,
     measured_velocity_world: np.ndarray | None = None,
     hinge_to_grasp_world: np.ndarray | None = None,
+    follow_scale: float = 1.0,
     progress_m: float = 0.0,
     singularity_scale: float = 1.0,
 ) -> TwistResult:
@@ -275,7 +276,9 @@ def compute_hybrid_twist(
         r = np.asarray(hinge_to_grasp_world, float)
         r_sq = float(r @ r)
         if r_sq > 1e-6:
-            omega = omega + np.cross(r, linear) / r_sq
+            # follow_scale ramps this in: switching full rotation on at a threshold is a step
+            # the wrist feels as a jolt, and the radius estimate is still settling at that point.
+            omega = omega + float(np.clip(follow_scale, 0.0, 1.0)) * np.cross(r, linear) / r_sq
 
     omega_norm = float(np.linalg.norm(omega))
     if omega_norm > cfg.max_rotation_rate:

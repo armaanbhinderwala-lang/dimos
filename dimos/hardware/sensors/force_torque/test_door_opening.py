@@ -387,8 +387,10 @@ def test_rotation_reverses_with_travel_direction():
 def test_over_rotation_is_what_a_small_radius_causes():
     """The hardware failure: a radius fitted 36% low commanded 1.6x too much rotation,
     the gripper out-turned the door, and it swung shut."""
-    cfg = AdmittanceConfig()
-    vel = np.array([0.02, 0.0, 0.0])
+    import dataclasses
+    # Slow enough that neither case hits max_rotation_rate, so this measures v/r and not the cap.
+    cfg = dataclasses.replace(AdmittanceConfig(), drive_speed=0.01)
+    vel = np.array([0.01, 0.0, 0.0])
     true_r, fitted_r = 0.30, 0.191
     w_true = compute_hybrid_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]), cfg,
                                   measured_velocity_world=vel,
