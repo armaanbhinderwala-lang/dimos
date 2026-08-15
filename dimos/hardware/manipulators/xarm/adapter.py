@@ -42,9 +42,11 @@ _XARM_LIFECYCLE_SPEED_DEG = 20.0
 _XARM_LIFECYCLE_ACCEL_DEG = 500.0
 _XARM6_INITIAL_JOINTS_DEG = [0.0, -40.0, -50.0, 0.0, 90.0, 0.0]
 # dimos builds the URDF with limited:=true, so the ranges are NOT the xarm defaults:
-# j1/j3/j5/j7 +-178.2, j2 +-124.9, j4 -6.3..178.2, j6 -100.3..178.2. j4's centre is 86 deg,
-# not 0 -- every joint here sits >90 deg from a stop, against a 5.7 deg guard.
-_XARM7_INITIAL_JOINTS_DEG = [0.0, -6.5, 0.0, 85.0, 0.0, 0.0, 20.0]
+# j1/j3/j5/j7 +-178.2, j2 +-124.9, j4 -6.3..178.2, j6 -100.3..178.2. j4 sits at its centre.
+# j6 starts at +20 rather than 0: the pull drives it toward its -100.3 stop, and this is 20 deg
+# more travel before that (120 vs 100) while staying under the 30 deg self-collision limit.
+# j2 = -26.75 keeps the tool on -X (checked against the model, verify by eye at home).
+_XARM7_INITIAL_JOINTS_DEG = [0.0, -26.75, 0.0, 85.0, 0.0, 20.0, 20.0]
 
 # XArm mode codes
 _XARM_MODE_POSITION = 0
