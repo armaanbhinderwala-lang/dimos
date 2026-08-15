@@ -1,0 +1,10 @@
+{"module": "ftrecorder", "event": "Module stopped.", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.728433Z", "func_name": "stop", "lineno": 113}
+{"module": "wrenchplotter", "event": "Stopping module...", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.728921Z", "func_name": "stop", "lineno": 108}
+{"module": "wrenchplotter", "event": "Module stopped.", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.757663Z", "func_name": "stop", "lineno": 113}
+{"module": "ftpullmodule", "event": "Stopping module...", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.757923Z", "func_name": "stop", "lineno": 108}
+{"module": "ftpullmodule", "event": "Module stopped.", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.765241Z", "func_name": "stop", "lineno": 113}
+{"module": "xarmftsensor", "event": "Stopping module...", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.765438Z", "func_name": "stop", "lineno": 108}
+{"module": "xarmftsensor", "event": "Module stopped.", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.808319Z", "func_name": "stop", "lineno": 113}
+{"module": "manipulationmodule", "event": "Stopping module...", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.808570Z", "func_name": "stop", "lineno": 108}
+{"module": "manipulationmodule", "event": "Module stopped.", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.829149Z", "func_name": "stop", "lineno": 113}
+{"module": "controlcoordinator", "event": "Stopping module...", "level": "info", "logger": "dimos/core/coordination/module_coordinator.py", "timestamp": "2026-08-14T23:17:22.829407Z", "func_name": "stop", "lineno": 108}

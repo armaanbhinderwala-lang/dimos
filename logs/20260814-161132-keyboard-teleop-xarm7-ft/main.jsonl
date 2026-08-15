@@ -1,0 +1,1 @@
+{"event": "All workers shut down", "level": "info", "logger": "dimos/core/coordination/worker_manager_python.py", "timestamp": "2026-08-14T23:12:59.147837Z", "func_name": "stop", "lineno": 217}

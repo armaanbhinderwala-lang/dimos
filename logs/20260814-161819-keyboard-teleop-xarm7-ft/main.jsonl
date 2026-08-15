@@ -1,0 +1,3 @@
+{"event": "All monitors stopped", "level": "info", "logger": "dimos/manipulation/planning/monitor/world_monitor.py", "timestamp": "2026-08-14T23:19:12.720669Z", "func_name": "stop_all_monitors", "lineno": 261}
+{"event": "No state monitor for robot_id: robot_1", "level": "warning", "logger": "dimos/manipulation/planning/monitor/world_monitor.py", "timestamp": "2026-08-14T23:19:12.729466Z", "func_name": "on_joint_state", "lineno": 278}
+{"event": "No state monitor for robot_id: robot_1", "level": "warning", "logger": "dimos/manipulation/planning/monitor/world_monitor.py", "timestamp": "2026-08-14T23:19:12.745858Z", "func_name": "on_joint_state", "lineno": 278}
