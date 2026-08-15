@@ -199,6 +199,7 @@ class FTAdaptivePullModule(Module):
     _lock: threading.Lock
     _latest_wrench: np.ndarray | None = None  # [Fx,Fy,Fz,Mx,My,Mz], tool frame
     _latest_q: np.ndarray | None = None
+    _following_logged: bool = False
     _hinge_centre: Any = None
     _hinge_axis: Any = None
     _pin_model: Any = None
@@ -439,6 +440,7 @@ class FTAdaptivePullModule(Module):
                         if previous_position is not None else np.zeros(3))
             previous_position = position
 
+            swept = follow = 0.0
             if self.config.use_hybrid_law:
                 # Known only after the probe, so the probe itself pulls straight and the
                 # execute phase follows the arc.
@@ -452,6 +454,13 @@ class FTAdaptivePullModule(Module):
                                  / max(self.config.follow_ramp_deg, 1e-6), 0.0, 1.0)
                 to_grasp = (position - np.asarray(self._hinge_centre)
                             if self._hinge_centre is not None and follow > 0.0 else None)
+                if to_grasp is not None and not self._following_logged:
+                    self._following_logged = True
+                    logger.info(
+                        "[%s] DOOR-FOLLOWING ENGAGED at %.0f deg swept, radius %.3fm -- the "
+                        "gripper will now turn with the door.",
+                        name, swept, float(np.linalg.norm(to_grasp)),
+                    )
                 result = compute_hybrid_twist(
                     force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
                     measured_velocity_world=velocity, hinge_to_grasp_world=to_grasp,
@@ -496,10 +505,12 @@ class FTAdaptivePullModule(Module):
             stats.min_sigma = min(stats.min_sigma, sigma_min)
             if stats.ticks % 25 == 0:
                 logger.info(
-                    "[%s tick %d] resistance=%.1fN torque=%.1fNm |v|=%.3fm/s |omega|=%.3frad/s covered=%.1fcm sigma_min=%.4f",
+                    "[%s tick %d] resistance=%.1fN torque=%.1fNm |v|=%.3fm/s |omega|=%.3frad/s "
+                    "covered=%.1fcm opened=%.0fdeg follow=%.2f sigma_min=%.4f margin=%.3f",
                     name, stats.ticks, result.resistance_force, result.torque_mag,
                     float(np.linalg.norm(linear_cmd)), float(np.linalg.norm(angular_cmd)),
-                    stats.distance_covered * 100, sigma_min,
+                    stats.distance_covered * 100, swept, float(follow), sigma_min,
+                    float(np.min(np.minimum(q - self._q_lower, self._q_upper - q))),
                 )
 
             await asyncio.sleep(dt)
