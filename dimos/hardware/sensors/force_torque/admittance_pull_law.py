@@ -62,7 +62,10 @@ class AdmittanceConfig:
     # 0.01, not 0.05: on the DIY sensor the smallest trustworthy torque change is ~0.7 N*m
     # (measured), so a high gain turns sensor noise into wrist motion. Torque steers coarsely
     # here; force does the work.
-    k_rot: float = 0.01  # (rad/s)/(N*m)
+    # 0.03: with door-following supplying the bulk of the rotation, this term's job is to
+    # correct the residual. Hardware shows 0.8-2.5 N*m during a pull -- well above the 0.35
+    # N*m deadband -- so it has real signal to work with, and it opposes over-rotation.
+    k_rot: float = 0.03  # (rad/s)/(N*m)
     max_lateral_speed: float = 0.03  # m/s -- half the drive speed, so compliance cannot dominate
     max_rotation_rate: float = 0.15  # rad/s (~9 deg/s) -- smoothness over responsiveness
     force_cutoff: float = 80.0  # N, total force magnitude -- comfortably under SENSOR_FORCE_OVERLOAD_N

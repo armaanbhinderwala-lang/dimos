@@ -109,6 +109,17 @@ class FTAdaptivePullConfig(ModuleConfig):
     min_hinge_radius_m: float = 0.15
     max_hinge_radius_m: float = 0.80
 
+    # Refit the hinge as the pull proceeds. The probe sees ~15 degrees of arc, which pins a
+    # circle weakly -- three hardware runs fitted 0.274, 0.109 and 0.191 m for the same door.
+    # By mid-pull there is 40+ degrees to fit, and since the commanded rotation is v/r, a
+    # radius that is too small over-rotates the gripper and pushes the door shut.
+    refit_hinge_every_ticks: int = 25
+
+    # Door-following waits for this much arc. Measured: a 15-degree probe fits the radius 29%
+    # low, which commands 1.41x too much rotation -- the gripper out-turns the door, twists the
+    # grasp and pushes it shut. By 25 degrees the fit is within 5%.
+    min_arc_for_following_deg: float = 25.0
+
     # Phase 2: execute. Deliberately slow -- "human-like," not scaled by how
     # heavy the door is; the calibrated cutoffs below are what adapts to the
     # door, not the pace.
@@ -373,6 +384,12 @@ class FTAdaptivePullModule(Module):
             if stats.distance_covered >= max_progress_m:
                 stats.stop_reason = "reached target"
                 break
+            if (name == "execute" and self._hinge_centre is not None
+                    and self._swept_angle_deg(stats.tool_path) >= self.config.target_open_angle_deg):
+                stats.stop_reason = f"reached {self.config.target_open_angle_deg:.0f} deg"
+                logger.info("[%s] Door is open to %.0f degrees -- stopping.",
+                            name, self.config.target_open_angle_deg)
+                break
 
             state = self._get_state()
             if state is None:
@@ -417,8 +434,15 @@ class FTAdaptivePullModule(Module):
             if self.config.use_hybrid_law:
                 # Known only after the probe, so the probe itself pulls straight and the
                 # execute phase follows the arc.
-                to_grasp = (None if self._hinge_centre is None
-                            else position - np.asarray(self._hinge_centre))
+                if (self._hinge_centre is not None and self.config.refit_hinge_every_ticks
+                        and stats.ticks and stats.ticks % self.config.refit_hinge_every_ticks == 0):
+                    self._refit_hinge(stats.tool_path)
+                swept = self._swept_angle_deg(stats.tool_path)
+                # Hold off until the fit has enough arc behind it -- over-rotating is what
+                # shut the door, and under-rotating merely loads the wrist a little.
+                to_grasp = (position - np.asarray(self._hinge_centre)
+                            if self._hinge_centre is not None
+                            and swept >= self.config.min_arc_for_following_deg else None)
                 result = compute_hybrid_twist(
                     force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
                     measured_velocity_world=velocity, hinge_to_grasp_world=to_grasp,
@@ -476,6 +500,32 @@ class FTAdaptivePullModule(Module):
             stats.peak_resistance_force, stats.peak_torque, stats.min_sigma,
         )
         return stats
+
+    def _swept_angle_deg(self, path: list) -> float:
+        """Angle turned about the hinge so far, from the first recorded point."""
+        if self._hinge_centre is None or len(path) < 2:
+            return 0.0
+        axis = np.asarray(self._hinge_axis, float)
+        axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+        centre = np.asarray(self._hinge_centre, float)
+        first, last = np.asarray(path[0]) - centre, np.asarray(path[-1]) - centre
+        first, last = first - np.dot(first, axis) * axis, last - np.dot(last, axis) * axis
+        n1, n2 = np.linalg.norm(first), np.linalg.norm(last)
+        if n1 < 1e-6 or n2 < 1e-6:
+            return 0.0
+        return float(np.degrees(np.arccos(np.clip(np.dot(first, last) / (n1 * n2), -1.0, 1.0))))
+
+    def _refit_hinge(self, path: list) -> None:
+        """Re-estimate from the whole path so far. More arc pins the circle far better."""
+        if len(path) < 20:
+            return
+        fit = fit_hinge(np.array(path))
+        if fit is None:
+            return
+        centre, axis, radius = fit
+        if not (self.config.min_hinge_radius_m <= radius <= self.config.max_hinge_radius_m):
+            return
+        self._hinge_centre, self._hinge_axis = centre, axis
 
     def _assess_arc(self, probe: PhaseStats) -> float | None:
         """Fit the hinge from the probe's motion, then check the arc.

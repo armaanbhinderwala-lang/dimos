@@ -382,3 +382,37 @@ def test_rotation_reverses_with_travel_direction():
                              measured_velocity_world=np.array([-0.02, 0, 0]),
                              hinge_to_grasp_world=r).angular
     assert np.sign(a[2]) == -np.sign(b[2]), "reversing travel must reverse the rotation"
+
+
+def test_over_rotation_is_what_a_small_radius_causes():
+    """The hardware failure: a radius fitted 36% low commanded 1.6x too much rotation,
+    the gripper out-turned the door, and it swung shut."""
+    cfg = AdmittanceConfig()
+    vel = np.array([0.02, 0.0, 0.0])
+    true_r, fitted_r = 0.30, 0.191
+    w_true = compute_hybrid_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]), cfg,
+                                  measured_velocity_world=vel,
+                                  hinge_to_grasp_world=np.array([0.0, -true_r, 0.0])).angular
+    w_bad = compute_hybrid_twist(np.zeros(3), np.zeros(3), np.eye(3), np.array([1.0, 0, 0]), cfg,
+                                 measured_velocity_world=vel,
+                                 hinge_to_grasp_world=np.array([0.0, -fitted_r, 0.0])).angular
+    ratio = np.linalg.norm(w_bad) / np.linalg.norm(w_true)
+    assert 1.5 < ratio < 1.7, f"expected ~1.57x over-rotation, got {ratio:.2f}"
+
+
+def test_longer_arc_fits_the_radius_better():
+    """Justifies refitting during the pull rather than trusting the probe."""
+    hinge = np.array([0.5, 0.4, 0.3])
+    errors = []
+    for degrees in (15, 40):
+        got = []
+        for seed in range(15):
+            pts = arc_waypoints(hinge + np.array([0, -0.30, 0]), hinge,
+                                np.array([0.0, 0.0, 1.0]), np.radians(degrees), 40)
+            pts = pts + np.random.default_rng(seed).normal(0, 0.0005, pts.shape)
+            fit = fit_hinge(pts)
+            if fit:
+                got.append(abs(fit[2] - 0.30) / 0.30)
+        errors.append(float(np.median(got)))
+    assert errors[1] < errors[0] / 3, f"40 deg must fit far better than 15 deg, got {errors}"
+    assert errors[1] < 0.05, "a mid-pull fit should be within 5%"
