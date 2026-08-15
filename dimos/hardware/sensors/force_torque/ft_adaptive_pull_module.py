@@ -403,8 +403,14 @@ class FTAdaptivePullModule(Module):
             near_limit = self._near_joint_limit(q)
             if near_limit is not None:
                 logger.warning(
-                    "[%s] Joint %d at %.3f rad is within the safety margin of its limit -- stopping.",
-                    name, near_limit, q[near_limit],
+                    "[%s] joint%d at %.3f rad is %.3f rad from its %s limit (%.3f..%.3f) "
+                    "-- stopping.",
+                    name, near_limit + 1, q[near_limit],
+                    min(q[near_limit] - self._q_lower[near_limit],
+                        self._q_upper[near_limit] - q[near_limit]),
+                    "lower" if (q[near_limit] - self._q_lower[near_limit]
+                                < self._q_upper[near_limit] - q[near_limit]) else "upper",
+                    self._q_lower[near_limit], self._q_upper[near_limit],
                 )
                 stats.stop_reason = "joint limit"
                 break
