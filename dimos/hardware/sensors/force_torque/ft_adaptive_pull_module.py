@@ -614,7 +614,14 @@ class FTAdaptivePullModule(Module):
         if np.linalg.norm(perp) < 1e-9:
             return r_hat
         perp = perp / np.linalg.norm(perp)
-        return perp * float(np.sign(np.dot(r_hat, perp)) or 1.0)
+        # Sign: this sensor reports the reaction, so the measured radial force points AWAY
+        # from the hinge. Observed on hardware -- following the raw sign curled the handle
+        # away from the hinge and bound the grip at 40-45 deg.
+        side = -float(np.sign(np.dot(r_hat, perp)) or 1.0)
+        chosen = perp * side
+        logger.info("Hinge side from force: radial %s -> hinge toward %s.",
+                    np.round(r_hat, 3).tolist(), np.round(chosen, 3).tolist())
+        return chosen
 
     def _swept_angle_deg(self, path: list) -> float:
         """Angle turned about the hinge so far, from the first recorded point."""
