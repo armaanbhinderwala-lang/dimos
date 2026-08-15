@@ -569,6 +569,7 @@ class FTAdaptivePullModule(Module):
                     force_tool, torque_tool, ee_rot, drive_direction_world, cfg,
                     measured_velocity_world=velocity, hinge_to_grasp_world=to_grasp,
                     hinge_axis_world=(self._hinge_axis if to_grasp is not None else None),
+                    target_radius_m=self.config.door_radius_m,
                     follow_scale=float(follow),
                     progress_m=stats.distance_covered, singularity_scale=sing_scale,
                 )
