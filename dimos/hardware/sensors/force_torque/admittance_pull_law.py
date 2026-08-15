@@ -133,6 +133,11 @@ class AdmittanceConfig:
     min_motion_speed: float = 0.003     # m/s, below this motion is too slow to read a tangent from
     desired_radial_force: float = 5.0   # N, small but nonzero -- keeps the grasp loaded
     k_force: float = 0.004              # (m/s)/N, how hard radial force error is corrected
+    # Radial correction is capped at this FRACTION of the tangential speed. Hardware ran at
+    # 10-33 N against a 12 N saturation point, so the arm retreated radially as fast as it
+    # advanced -- which walks the gripper toward the hinge and folds the door shut. Bounding
+    # it relatively keeps forward progress guaranteed however wrong the radial estimate is.
+    max_radial_fraction: float = 0.4
 
 
 @dataclass
@@ -260,8 +265,9 @@ def compute_hybrid_twist(
     radial_mag = float(np.linalg.norm(radial_force))
     if radial_mag > cfg.contact_force_n:
         radial = radial_force / radial_mag
-        correction = np.clip(cfg.k_force * (cfg.desired_radial_force - radial_mag),
-                             -cfg.max_lateral_speed, cfg.max_lateral_speed)
+        limit = min(cfg.max_lateral_speed, cfg.max_radial_fraction * speed)
+        correction = float(np.clip(cfg.k_force * (cfg.desired_radial_force - radial_mag),
+                                   -limit, limit))
         linear = speed * tangent + correction * radial
     else:
         linear = speed * tangent

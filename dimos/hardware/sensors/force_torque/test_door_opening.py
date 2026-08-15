@@ -418,3 +418,26 @@ def test_longer_arc_fits_the_radius_better():
         errors.append(float(np.median(got)))
     assert errors[1] < errors[0] / 3, f"40 deg must fit far better than 15 deg, got {errors}"
     assert errors[1] < 0.05, "a mid-pull fit should be within 5%"
+
+
+def test_radial_correction_never_outruns_forward_progress():
+    """Hardware ran at 10-33 N against a 12 N saturation point, so the arm retreated radially
+    as fast as it advanced -- which walks the gripper toward the hinge and shuts the door."""
+    cfg = AdmittanceConfig()
+    vel = np.array([0.02, 0.0, 0.0])
+    for load in (10.0, 15.0, 25.0, 50.0, 100.0):
+        r = compute_hybrid_twist(np.array([0.0, load, 0.0]), np.zeros(3), np.eye(3),
+                                 np.array([1.0, 0, 0]), cfg, measured_velocity_world=vel)
+        tangential, radial = abs(r.linear[0]), abs(r.linear[1])
+        assert radial <= cfg.max_radial_fraction * tangential + 1e-9, \
+            f"at {load}N radial {radial:.4f} outran {cfg.max_radial_fraction:.0%} of {tangential:.4f}"
+        assert tangential > 0.0, "must always keep making forward progress"
+
+
+def test_radial_correction_still_relieves_load():
+    """Bounding it must not disable it -- an overloaded radial still backs off."""
+    cfg = AdmittanceConfig()
+    vel = np.array([0.0, 0.02, 0.0])
+    r = compute_hybrid_twist(np.array([30.0, 0.0, 0.0]), np.zeros(3), np.eye(3),
+                             np.array([1.0, 0, 0]), cfg, measured_velocity_world=vel)
+    assert r.linear[0] < 0, "a loaded radial must still be unloaded"
