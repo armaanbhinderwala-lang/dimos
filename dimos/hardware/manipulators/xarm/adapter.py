@@ -41,7 +41,9 @@ MAX_CARTESIAN_SPEED_MM = 500.0  # Max cartesian speed in mm/s
 _XARM_LIFECYCLE_SPEED_DEG = 20.0
 _XARM_LIFECYCLE_ACCEL_DEG = 500.0
 _XARM6_INITIAL_JOINTS_DEG = [0.0, -40.0, -50.0, 0.0, 90.0, 0.0]
-_XARM7_INITIAL_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0, 0.0, -90.0, 20.0]
+# j6 at -90 sits 10 deg from its -100.3 lower stop and a pull drives it there; -60 keeps the
+# same tool direction (pitch is j2+j4+j6) with 40 deg of room.
+_XARM7_INITIAL_JOINTS_DEG = [0.0, -30.0, 0.0, 0.0, 0.0, -60.0, 20.0]
 
 # XArm mode codes
 _XARM_MODE_POSITION = 0
