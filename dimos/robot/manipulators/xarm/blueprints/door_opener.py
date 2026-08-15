@@ -90,8 +90,14 @@ def _build(sensor_module, profile: str, tool_mass_kg: float,
                 # +-178 deg of range -- take a share. Damping replaces it as the regulariser:
                 # it penalises joint velocity and has no target, so unlike joint centring it
                 # cannot buy posture with task error (that is what lifted the microwave).
+                # Balance the redundancy instead of letting one joint run out: centring targets
+                # the middle of every range, so joint1/5/6/7 share the door's yaw rather than
+                # j6 taking it all and then j5. Cost is 1e-4 against a frame cost of 1.0 --
+                # 1e-2 was tried and the QP bought posture with ~5mm of task error, which is
+                # what lifted the microwave. Damping regularises what centring leaves free.
                 eef_twist_task(hardware, robot_model=control_model, timeout=0.0,
-                               control_ik={"posture_cost": 0.0, "damping_cost": 1e-3}),
+                               control_ik={"posture_cost": 0.0, "damping_cost": 1e-3,
+                                           "joint_centering_cost": 1e-4}),
                 # [ and ] publish a JointState on joint_command, and routing delivers that
                 # only to `servo` tasks. Without this the gripper keys do nothing.
                 TaskConfig(
