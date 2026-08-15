@@ -224,6 +224,7 @@ def compute_hybrid_twist(
     cfg: AdmittanceConfig,
     measured_velocity_world: np.ndarray | None = None,
     hinge_to_grasp_world: np.ndarray | None = None,
+    hinge_axis_world: np.ndarray | None = None,
     follow_scale: float = 1.0,
     progress_m: float = 0.0,
     singularity_scale: float = 1.0,
@@ -251,13 +252,27 @@ def compute_hybrid_twist(
         progress_m, cfg.decel_start_m, cfg.decel_full_m, cfg.decel_floor_scale
     )
 
-    # Tangent from motion, not force: before the door breaks free the resistance is head-on,
-    # so a force-derived tangent cancels to zero exactly when it needs to push.
-    speed_now = float(np.linalg.norm(measured_velocity_world))
-    if speed_now > cfg.min_motion_speed:
-        tangent = measured_velocity_world / speed_now
-    else:
-        tangent = drive_direction_world / max(float(np.linalg.norm(drive_direction_world)), 1e-12)
+    drive_hat = drive_direction_world / max(float(np.linalg.norm(drive_direction_world)), 1e-12)
+    # With a committed hinge the door allows exactly one direction: perpendicular to the
+    # radius, in the hinge plane. Take it from geometry. Steering off measured velocity makes
+    # the command follow whatever the arm last did, so a shove is adopted as the new heading
+    # and the door can be walked back shut. Geometry cannot reverse.
+    tangent = None
+    if hinge_to_grasp_world is not None and hinge_axis_world is not None:
+        axis = np.asarray(hinge_axis_world, float)
+        axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+        r = np.asarray(hinge_to_grasp_world, float)
+        r = r - np.dot(r, axis) * axis
+        if np.linalg.norm(r) > 1e-6:
+            t = np.cross(axis, r / np.linalg.norm(r))
+            if np.linalg.norm(t) > 1e-9:
+                t = t / np.linalg.norm(t)
+                # Opening sense, fixed by the tool's own pull axis, which turns with the door.
+                tangent = t if float(np.dot(t, drive_hat)) >= 0.0 else -t
+    if tangent is None:
+        speed_now = float(np.linalg.norm(measured_velocity_world))
+        tangent = (measured_velocity_world / speed_now
+                   if speed_now > cfg.min_motion_speed else drive_hat)
 
     # Only the part of the force perpendicular to travel is fighting the constraint; the
     # tangential part is friction, the price of moving.
