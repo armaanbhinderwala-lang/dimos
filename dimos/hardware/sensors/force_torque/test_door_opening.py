@@ -425,13 +425,19 @@ def test_radial_correction_never_outruns_forward_progress():
     as fast as it advanced -- which walks the gripper toward the hinge and shuts the door."""
     cfg = AdmittanceConfig()
     vel = np.array([0.02, 0.0, 0.0])
-    for load in (10.0, 15.0, 25.0, 50.0, 100.0):
+    for load in (10.0, 15.0, 25.0, 50.0, cfg.force_cutoff - 1):   # above the cutoff it must STOP
         r = compute_hybrid_twist(np.array([0.0, load, 0.0]), np.zeros(3), np.eye(3),
                                  np.array([1.0, 0, 0]), cfg, measured_velocity_world=vel)
         tangential, radial = abs(r.linear[0]), abs(r.linear[1])
         assert radial <= cfg.max_radial_fraction * tangential + 1e-9, \
             f"at {load}N radial {radial:.4f} outran {cfg.max_radial_fraction:.0%} of {tangential:.4f}"
         assert tangential > 0.0, "must always keep making forward progress"
+
+    stopped = compute_hybrid_twist(np.array([0.0, cfg.force_cutoff + 1, 0.0]), np.zeros(3),
+                                   np.eye(3), np.array([1.0, 0, 0]), cfg,
+                                   measured_velocity_world=vel)
+    assert stopped.safety_stop and np.allclose(stopped.linear, 0.0), \
+        "past the cutoff it must stop entirely, not keep creeping forward"
 
 
 def test_radial_correction_still_relieves_load():
