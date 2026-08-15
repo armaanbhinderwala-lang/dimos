@@ -609,7 +609,12 @@ class FTAdaptivePullModule(Module):
         radial = force - np.dot(force, t_hat) * t_hat
         if np.linalg.norm(radial) < self.config.min_hinge_force_n:
             return None
-        return radial / np.linalg.norm(radial)
+        r_hat = radial / np.linalg.norm(radial)
+        perp = np.cross(axis, t_hat)
+        if np.linalg.norm(perp) < 1e-9:
+            return r_hat
+        perp = perp / np.linalg.norm(perp)
+        return perp * float(np.sign(np.dot(r_hat, perp)) or 1.0)
 
     def _swept_angle_deg(self, path: list) -> float:
         """Angle turned about the hinge so far, from the first recorded point."""
@@ -677,12 +682,12 @@ class FTAdaptivePullModule(Module):
                     result["worst_sigma"], result["worst_margin"],
                 )
                 if result["blocked_at"] is not None:
-                    logger.warning("Arc blocked at %.0f deg (%s).",
-                                   np.degrees(result["blocked_at"]), result["blocked_by"])
-                else:
-                    logger.info("Arc is clear for the full %.0f degrees.",
-                                self.config.target_open_angle_deg)
-                return result
+                    logger.warning("Arc is NOT clear: stalls at about %.0f of %.0f deg.",
+                                   result["blocked_at"], self.config.target_open_angle_deg)
+                    return float(result["blocked_at"])
+                logger.info("Arc is clear for the full %.0f degrees.",
+                            self.config.target_open_angle_deg)
+                return None
         if len(probe.tool_path) < 5:
             logger.info("Arc check skipped: probe recorded only %d points.", len(probe.tool_path))
             return None
