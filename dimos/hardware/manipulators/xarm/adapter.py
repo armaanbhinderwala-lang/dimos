@@ -41,10 +41,10 @@ MAX_CARTESIAN_SPEED_MM = 500.0  # Max cartesian speed in mm/s
 _XARM_LIFECYCLE_SPEED_DEG = 20.0
 _XARM_LIFECYCLE_ACCEL_DEG = 500.0
 _XARM6_INITIAL_JOINTS_DEG = [0.0, -40.0, -50.0, 0.0, 90.0, 0.0]
-# Wrist flipped: j5 near 180 with j6=+90 aims the tool along -X as j6=-90 did, but leaves
-# joint6 90 deg from either stop instead of 7. Held 5 deg off +-pi: Pink rejects a seed that
-# starts on a joint bound, and home only seeds the pose -- the grasp is teleoperated.
-_XARM7_INITIAL_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0, 175.0, 90.0, 20.0]
+# joint5 is +-178.2 deg and a pull rolls it; starting near 180 left 3 deg of room. Keep it at
+# 0 instead and aim the tool with j2/j6 (tool pitch is j2+j6 when j4=0), which also keeps
+# joint6 67 deg off its -97 stop.
+_XARM7_INITIAL_JOINTS_DEG = [0.0, -60.0, 0.0, 0.0, 0.0, -30.0, 20.0]
 
 # XArm mode codes
 _XARM_MODE_POSITION = 0
