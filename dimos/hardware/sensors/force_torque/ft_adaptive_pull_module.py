@@ -103,6 +103,7 @@ class FTAdaptivePullConfig(ModuleConfig):
     # far too weakly -- two hardware runs fitted radii of 0.274 m and 0.109 m for the same door.
     probe_distance_m: float = 0.08  # m -- stop the probe here even if never resisted
     probe_min_ticks: int = 20  # enough force samples to average before trusting the direction
+    probe_min_distance_m: float = 0.04  # and enough travel for the constraint to actually build
     probe_max_duration: float = 8.0  # s, safety net independent of distance
 
     # A fitted radius outside this range is not believable for an appliance door; the pull
@@ -443,6 +444,7 @@ class FTAdaptivePullModule(Module):
             # clear, every further centimetre of straight pull is fighting the hinge for
             # nothing -- force has been running to 75N by 6cm.
             if (name == "probe" and stats.ticks >= self.config.probe_min_ticks
+                    and stats.distance_covered >= self.config.probe_min_distance_m
                     and self._hinge_direction_from_force(stats) is not None):
                 stats.stop_reason = "constraint force resolved"
                 logger.info("[%s] Constraint direction resolved after %.1fcm -- probe done.",
@@ -600,7 +602,13 @@ class FTAdaptivePullModule(Module):
             return None
         axis = np.asarray(self.config.hinge_axis_world, float)
         axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
-        travel = np.asarray(probe.tool_path[-1], float) - np.asarray(probe.tool_path[0], float)
+        # Reference direction is the tool's own pull axis, not the path. Over a short probe the
+        # measured displacement is mostly lateral drift from the radial correction, and a
+        # perpendicular taken from that points along the pull -- which no hinge can be.
+        state = self._get_state()
+        if state is None:
+            return None
+        travel = np.asarray(self._forward_kinematics(state[1]).rotation) @ self._local_drive
         travel = travel - np.dot(travel, axis) * axis
         force = np.asarray(probe.force_world_sum, float) / probe.ticks
         force = force - np.dot(force, axis) * axis
