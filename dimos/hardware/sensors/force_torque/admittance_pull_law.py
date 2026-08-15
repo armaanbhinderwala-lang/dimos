@@ -51,8 +51,6 @@ import numpy as np
 # error 53 ("sensor overloaded or reading exceeds limit") is the sensor's OWN hardware trip,
 # faster and stricter than anything our software checks once per tick. A software cutoff set
 # above these numbers can never actually protect anything -- the hardware faults first, always.
-# Radius-hold gain and its speed cap: how hard the tool is pulled back onto the taught circle.
-K_RADIUS_DEFAULT = 0.6
 SENSOR_FORCE_OVERLOAD_N = 225.0  # 150N rated x 1.5, the smaller (more conservative) of Fx/Fy/Fz
 SENSOR_TORQUE_OVERLOAD_NM = 6.0  # 4N*m rated x 1.5, same on all three torque axes
 
@@ -70,8 +68,6 @@ class AdmittanceConfig:
     k_rot: float = 0.03  # (rad/s)/(N*m)
     max_lateral_speed: float = 0.03  # m/s -- half the drive speed, so compliance cannot dominate
     max_rotation_rate: float = 0.15  # rad/s (~9 deg/s) -- smoothness over responsiveness
-    k_radius: float = K_RADIUS_DEFAULT  # 1/s, radial speed per metre of radius error
-    max_radial_speed: float = 0.02      # m/s, cap on the radius-hold correction
     force_cutoff: float = 80.0  # N, total force magnitude -- comfortably under SENSOR_FORCE_OVERLOAD_N
     torque_cutoff: float = 4.5  # N*m -- was 15.0, ABOVE the sensor's real ~6N*m overload rating; grounded in the datasheet now
     # (resistance_force upper bound N, speed multiplier) -- max capped at 1.0, unlike Yashas's original
@@ -229,7 +225,6 @@ def compute_hybrid_twist(
     measured_velocity_world: np.ndarray | None = None,
     hinge_to_grasp_world: np.ndarray | None = None,
     hinge_axis_world: np.ndarray | None = None,
-    target_radius_m: float | None = None,
     follow_scale: float = 1.0,
     progress_m: float = 0.0,
     singularity_scale: float = 1.0,
@@ -279,35 +274,18 @@ def compute_hybrid_twist(
         tangent = (measured_velocity_world / speed_now
                    if speed_now > cfg.min_motion_speed else drive_hat)
 
-    # With a committed hinge, hold the radius geometrically rather than regulating contact
-    # force. Distance to the hinge is what a door actually constrains, it is measured exactly
-    # every tick and needs no force reading -- whereas a small error in the hinge centre grows
-    # with angle until the arm is hauling the whole appliance inward.
-    linear = None
-    if hinge_to_grasp_world is not None and target_radius_m and hinge_axis_world is not None:
-        axis_r = np.asarray(hinge_axis_world, float)
-        axis_r = axis_r / max(float(np.linalg.norm(axis_r)), 1e-12)
-        rv = np.asarray(hinge_to_grasp_world, float)
-        rv = rv - np.dot(rv, axis_r) * axis_r
-        r_now = float(np.linalg.norm(rv))
-        if r_now > 1e-6:
-            hold = float(np.clip(cfg.k_radius * (target_radius_m - r_now),
-                                 -cfg.max_radial_speed, cfg.max_radial_speed))
-            linear = speed * tangent + hold * (rv / r_now)
-
-    # Otherwise fall back to force: only the part perpendicular to travel fights the
-    # constraint; the tangential part is friction, the price of moving.
+    # Only the part of the force perpendicular to travel is fighting the constraint; the
+    # tangential part is friction, the price of moving.
     radial_force = f_world - np.dot(f_world, tangent) * tangent
     radial_mag = float(np.linalg.norm(radial_force))
-    if linear is None:
-        if radial_mag > cfg.contact_force_n:
-            radial = radial_force / radial_mag
-            limit = min(cfg.max_lateral_speed, cfg.max_radial_fraction * speed)
-            correction = float(np.clip(cfg.k_force * (cfg.desired_radial_force - radial_mag),
-                                       -limit, limit))
-            linear = speed * tangent + correction * radial
-        else:
-            linear = speed * tangent
+    if radial_mag > cfg.contact_force_n:
+        radial = radial_force / radial_mag
+        limit = min(cfg.max_lateral_speed, cfg.max_radial_fraction * speed)
+        correction = float(np.clip(cfg.k_force * (cfg.desired_radial_force - radial_mag),
+                                   -limit, limit))
+        linear = speed * tangent + correction * radial
+    else:
+        linear = speed * tangent
 
     # Hand rotation over from torque compliance to geometry as following ramps in. Compliance
     # is a trim term -- on this sensor it reached 0.11 rad/s against the 0.054 the arc wanted,
