@@ -59,11 +59,12 @@ DOOR_RADIUS_M = 0.368  # 14.5 in, hinge pin to handle
 # the arm, +Y is the arm's LEFT. Set explicitly because the force reading put the hinge on the
 # opposite side to the real one, and a wrong side drives the door away from its hinge.
 # Set to None to go back to reading it from the constraint force.
-HINGE_DIRECTION_WORLD = (0.0, -1.0, 0.0)
+HINGE_DIRECTION_WORLD = (0.0, 1.0, 0.0)
 
 
 def _build(sensor_module, profile: str, tool_mass_kg: float,
            tool_com_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+           safety_cutoffs_enabled: bool = True,
            force_axis_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
            door_radius_m: float | None = DOOR_RADIUS_M,
            hinge_direction_world: tuple[float, float, float] | None = HINGE_DIRECTION_WORLD):
@@ -110,6 +111,7 @@ def _build(sensor_module, profile: str, tool_mass_kg: float,
             tool_com_m=tool_com_m,
             force_axis_weights=force_axis_weights,
             door_radius_m=door_radius_m,
+            safety_cutoffs_enabled=safety_cutoffs_enabled,
             hinge_direction_world=hinge_direction_world,
             auto_run=False,
         ),
@@ -138,4 +140,7 @@ door_opener_xarm7_diy = _build(
     tool_mass_kg=DIY_TOOL_MASS_KG,
     tool_com_m=DIY_TOOL_COM_M,
     force_axis_weights=(1.0, 1.0, 0.0),
+    # Off at the operator's request while tuning: force trips were ending runs long before
+    # anything was actually at risk. Turn back on before leaving this unattended.
+    safety_cutoffs_enabled=False,
 )

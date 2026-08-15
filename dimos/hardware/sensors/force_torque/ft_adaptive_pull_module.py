@@ -104,6 +104,9 @@ class FTAdaptivePullConfig(ModuleConfig):
     probe_distance_m: float = 0.08  # m -- stop the probe here even if never resisted
     probe_min_ticks: int = 20  # enough force samples to average before trusting the direction
     probe_min_distance_m: float = 0.04  # and enough travel for the constraint to actually build
+    # Force and torque cutoffs, both the reactive one and the fast-path sensor trip. Off means
+    # nothing stops the pull on load -- the sensor's own rating still applies in hardware.
+    safety_cutoffs_enabled: bool = True
     # Travel before the assumed hinge side is judged, and how much radius growth is tolerated.
     side_check_distance_m: float = 0.03
     side_check_tolerance: float = 1.08
@@ -399,7 +402,9 @@ class FTAdaptivePullModule(Module):
         # on torque) might miss between ticks, so it must trip at least as early, not later.
         force_mag = float(np.linalg.norm(wrench[:3]))
         torque_mag = float(np.linalg.norm(wrench[3:]))
-        if force_mag > SENSOR_FORCE_OVERLOAD_N * 0.7 or torque_mag > SENSOR_TORQUE_OVERLOAD_NM * 0.7:
+        if self.config.safety_cutoffs_enabled and (
+                force_mag > SENSOR_FORCE_OVERLOAD_N * 0.7
+                or torque_mag > SENSOR_TORQUE_OVERLOAD_NM * 0.7):
             if not self._stop_requested:
                 logger.warning(
                     "Fast-path overload trip: force=%.1fN torque=%.2fNm -- stopping immediately.",
@@ -825,6 +830,8 @@ class FTAdaptivePullModule(Module):
                 drive_speed=self.config.probe_speed,
                 decel_start_m=self.config.probe_distance_m * 0.5,
                 decel_full_m=self.config.probe_distance_m,
+                **({} if self.config.safety_cutoffs_enabled
+                   else {"force_cutoff": float("inf"), "torque_cutoff": float("inf")}),
             )
             probe = await self._run_phase("probe", probe_cfg, self.config.probe_distance_m, self.config.probe_max_duration)
 
@@ -844,15 +851,21 @@ class FTAdaptivePullModule(Module):
                 # Clamped below the sensor's own hardware overload rating (see admittance_pull_law.py)
                 # -- a calibrated cutoff above that can never actually protect anything, the hardware
                 # faults first regardless of what our software thinks is safe.
-                force_cutoff = min(
-                    max(probe.peak_resistance_force * self.config.cutoff_safety_margin, self.config.min_force_cutoff),
-                    SENSOR_FORCE_OVERLOAD_N * 0.8,
-                    self.config.max_force_cutoff_n,
-                )
-                torque_cutoff = min(
-                    max(probe.peak_torque * self.config.cutoff_safety_margin, self.config.min_torque_cutoff),
-                    SENSOR_TORQUE_OVERLOAD_NM * 0.8,
-                )
+                if not self.config.safety_cutoffs_enabled:
+                    force_cutoff = torque_cutoff = float("inf")
+                    logger.warning("Safety cutoffs are DISABLED for this pull.")
+                else:
+                    force_cutoff = min(
+                        max(probe.peak_resistance_force * self.config.cutoff_safety_margin,
+                            self.config.min_force_cutoff),
+                        SENSOR_FORCE_OVERLOAD_N * 0.8,
+                        self.config.max_force_cutoff_n,
+                    )
+                    torque_cutoff = min(
+                        max(probe.peak_torque * self.config.cutoff_safety_margin,
+                            self.config.min_torque_cutoff),
+                        SENSOR_TORQUE_OVERLOAD_NM * 0.8,
+                    )
                 logger.info(
                     "Probe measured peak_force=%.1fN peak_torque=%.1fNm -- executing with cutoffs force<=%.1fN torque<=%.1fNm",
                     probe.peak_resistance_force, probe.peak_torque, force_cutoff, torque_cutoff,
