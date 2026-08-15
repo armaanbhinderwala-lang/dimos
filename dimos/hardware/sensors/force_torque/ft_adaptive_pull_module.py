@@ -115,12 +115,14 @@ class FTAdaptivePullConfig(ModuleConfig):
     # radius that is too small over-rotates the gripper and pushes the door shut.
     refit_hinge_every_ticks: int = 25
 
-    # Door-following waits for this much arc. Measured: a 15-degree probe fits the radius 29%
-    # low, which commands 1.41x too much rotation -- the gripper out-turns the door, twists the
-    # grasp and pushes it shut. By 25 degrees the fit is within 5%.
-    min_arc_for_following_deg: float = 25.0
-    # Ramp to full following over this much further arc, so it eases in rather than steps on.
-    follow_ramp_deg: float = 15.0
+    # Hinge-to-handle distance, measured on the door with a ruler. The probe spans only ~15
+    # degrees, where the fitted radius scatters over [0.03, 0.28] on a true 0.30m door, and
+    # omega = v/r turns a low radius straight into over-rotation that shuts the door. When set,
+    # the fitted direction is kept and only its length is replaced.
+    door_radius_m: float | None = None
+    # Ease following in over this much travel. Distance, not swept angle: gating on arc was a
+    # deadlock, since the arc only appears once following is already on.
+    follow_ramp_m: float = 0.02
 
     # Phase 2: execute. Deliberately slow -- "human-like," not scaled by how
     # heavy the door is; the calibrated cutoffs below are what adapts to the
@@ -448,10 +450,9 @@ class FTAdaptivePullModule(Module):
                         and stats.ticks and stats.ticks % self.config.refit_hinge_every_ticks == 0):
                     self._refit_hinge(stats.tool_path)
                 swept = self._swept_angle_deg(stats.tool_path)
-                # Ease following in once the fit has enough arc behind it. Over-rotating is
-                # what shut the door; under-rotating merely loads the wrist a little.
-                follow = np.clip((swept - self.config.min_arc_for_following_deg)
-                                 / max(self.config.follow_ramp_deg, 1e-6), 0.0, 1.0)
+                # The arc check already cleared the full sweep, so follow from the start.
+                follow = np.clip(stats.distance_covered
+                                 / max(self.config.follow_ramp_m, 1e-6), 0.0, 1.0)
                 to_grasp = (position - np.asarray(self._hinge_centre)
                             if self._hinge_centre is not None and follow > 0.0 else None)
                 if to_grasp is not None and not self._following_logged:
@@ -568,6 +569,15 @@ class FTAdaptivePullModule(Module):
                 radius, self.config.min_hinge_radius_m, self.config.max_hinge_radius_m,
             )
             return None
+        if self.config.door_radius_m:
+            grasp0 = np.asarray(probe.tool_path[-1], float)
+            radial = grasp0 - hinge
+            radial -= np.dot(radial, axis) * axis
+            if np.linalg.norm(radial) > 1e-6:
+                hinge = grasp0 - radial / np.linalg.norm(radial) * self.config.door_radius_m
+                logger.info("Hinge radius %.3fm from the probe replaced with the measured %.3fm.",
+                            radius, self.config.door_radius_m)
+                radius = self.config.door_radius_m
         self._hinge_centre, self._hinge_axis = hinge, axis
 
         state = self._get_state()
