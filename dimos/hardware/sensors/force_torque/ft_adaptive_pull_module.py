@@ -104,13 +104,6 @@ class FTAdaptivePullConfig(ModuleConfig):
     probe_distance_m: float = 0.08  # m -- stop the probe here even if never resisted
     probe_min_ticks: int = 20  # enough force samples to average before trusting the direction
     probe_min_distance_m: float = 0.04  # and enough travel for the constraint to actually build
-    # Past this much arc, ease the jaws open a little. A rigid grip makes the handle track the
-    # arm's arc exactly, so any mismatch is prised out of the door; a loose one lets the handle
-    # slide and turn in the jaws and the door takes its own path while the arm keeps driving.
-    # 0.0 is shut, 1.0 is wide -- keep this small or the handle is dropped.
-    grip_release_angle_deg: float = 50.0
-    grip_release_position: float = 0.15
-    grip_joint_name: str = "arm/gripper"
     # Force and torque cutoffs, both the reactive one and the fast-path sensor trip. Off means
     # nothing stops the pull on load -- the sensor's own rating still applies in hardware.
     safety_cutoffs_enabled: bool = True
@@ -223,7 +216,6 @@ class FTAdaptivePullModule(Module):
     ext_wrench: In[WrenchStamped]
     coordinator_joint_state: In[JointState]
     coordinator_ee_twist_command: Out[TwistStamped]
-    joint_command: Out[JointState]
     start_pull_command: In[Bool]
     stop_pull_command: In[Bool]
 
@@ -231,7 +223,6 @@ class FTAdaptivePullModule(Module):
     _latest_wrench: np.ndarray | None = None  # [Fx,Fy,Fz,Mx,My,Mz], tool frame
     _latest_q: np.ndarray | None = None
     _following_logged: bool = False
-    _grip_released: bool = False
     _side_checked: bool = False
     _hinge_centre: Any = None
     _hinge_axis: Any = None
@@ -567,15 +558,6 @@ class FTAdaptivePullModule(Module):
                     else:
                         logger.info("Hinge side confirmed: radius held %.3fm over %.1fcm.",
                                     now, stats.distance_covered * 100)
-                if (not self._grip_released and self.config.grip_release_angle_deg
-                        and swept >= self.config.grip_release_angle_deg):
-                    self._grip_released = True
-                    self.joint_command.publish(JointState(
-                        name=[self.config.grip_joint_name],
-                        position=[self.config.grip_release_position]))
-                    logger.info(
-                        "[%s] %.0f deg opened -- easing the grip to %.2f so the door can take "
-                        "its own path.", name, swept, self.config.grip_release_position)
                 if to_grasp is not None and not self._following_logged:
                     self._following_logged = True
                     logger.info(
