@@ -317,68 +317,6 @@ class FTAdaptivePullModule(Module):
                 blocked_at = float(angle)
         return {"worst_sigma": worst_sigma, "worst_margin": worst_margin, "blocked_at": blocked_at}
 
-    def _suggest_reposition(self, q_now: np.ndarray, grasp: np.ndarray, hinge: np.ndarray,
-                            axis: np.ndarray, max_angle_rad: float) -> None:
-        """A blocked arc is decided by where the door sits, so say which way to move it.
-
-        Shifting the door shifts grasp and hinge together; the arc keeps its shape and only
-        its place in the arm's workspace changes.
-        """
-        best = None
-        for dx in (-0.10, -0.05, 0.0, 0.05, 0.10):
-            for dy in (-0.10, -0.05, 0.0, 0.05, 0.10):
-                if dx == 0.0 and dy == 0.0:
-                    continue
-                shift = np.array([dx, dy, 0.0])
-                r = self._check_arc(q_now, grasp + shift, hinge + shift, axis, max_angle_rad)
-                reach = np.degrees(max_angle_rad) if r["blocked_at"] is None else r["blocked_at"]
-                if best is None or reach > best[0]:
-                    best = (reach, dx, dy)
-        if best is None:
-            return
-        reach, dx, dy = best
-        if reach <= np.degrees(max_angle_rad) * 0.99:
-            logger.warning("No small shift clears the full arc; best nearby reaches %.0f deg.", reach)
-            return
-        logger.warning(
-            "Move the door %.0fcm in x and %.0fcm in y (base frame) and the full %.0f deg clears.",
-            dx * 100, dy * 100, np.degrees(max_angle_rad),
-        )
-
-    def _precheck_arc(self) -> None:
-        """Report reachability before the probe moves anything.
-
-        The arc only needs the grasp pose and the door radius, both known the moment the
-        gripper closes. Which side the hinge is on is not known yet, so check both -- if
-        neither clears, the grasp is wrong whichever way the door swings.
-        """
-        if not self.config.door_radius_m:
-            return
-        state = self._get_state()
-        if state is None:
-            return
-        _, q = state
-        pose = self._forward_kinematics(q)
-        grasp = np.asarray(pose.translation)
-        axis = np.asarray(self.config.hinge_axis_world, float)
-        axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
-        drive = np.asarray(pose.rotation) @ self._local_drive
-        drive = drive - np.dot(drive, axis) * axis
-        if np.linalg.norm(drive) < 1e-6:
-            return
-        side = np.cross(axis, drive / np.linalg.norm(drive))
-        target = np.radians(self.config.target_open_angle_deg)
-        for sign, label in ((1.0, "one side"), (-1.0, "the other")):
-            hinge = grasp + sign * side * self.config.door_radius_m
-            r = self._check_arc(q, grasp, hinge, axis, target)
-            if r["blocked_at"] is None:
-                logger.info("Pre-check: hinge on %s -> full %.0f deg is reachable.",
-                            label, self.config.target_open_angle_deg)
-            else:
-                logger.warning("Pre-check: hinge on %s -> stalls at %.0f of %.0f deg.",
-                               label, r["blocked_at"], self.config.target_open_angle_deg)
-                self._suggest_reposition(q, grasp, hinge, axis, target)
-
     def _manipulability(self, q: np.ndarray) -> float:
         """Smallest singular value of the tool-frame Jacobian -- backstop only, see AdmittanceConfig."""
         pinocchio.computeJointJacobians(self._pin_model, self._pin_data, q)
@@ -703,9 +641,8 @@ class FTAdaptivePullModule(Module):
                     result["worst_sigma"], result["worst_margin"],
                 )
                 if result["blocked_at"] is not None:
-                    logger.warning("Arc blocked at %.0f deg.", result["blocked_at"])
-                    self._suggest_reposition(q, grasp, hinge, axis,
-                                             np.radians(self.config.target_open_angle_deg))
+                    logger.warning("Arc blocked at %.0f deg (%s).",
+                                   np.degrees(result["blocked_at"]), result["blocked_by"])
                 else:
                     logger.info("Arc is clear for the full %.0f degrees.",
                                 self.config.target_open_angle_deg)
@@ -771,8 +708,6 @@ class FTAdaptivePullModule(Module):
             "of %.0f. Expect the pull to stall there.",
             result["blocked_at"], self.config.target_open_angle_deg,
         )
-        self._suggest_reposition(q, grasp, hinge, axis,
-                                 np.radians(self.config.target_open_angle_deg))
         return float(result["blocked_at"])
 
     async def _pull_loop(self) -> None:
@@ -791,7 +726,6 @@ class FTAdaptivePullModule(Module):
             base = replace(self.config.admittance,
                        force_axis_weights=self.config.force_axis_weights)
 
-            self._precheck_arc()
             logger.info("Probing door: speed=%.3fm/s over up to %.2fcm", self.config.probe_speed, self.config.probe_distance_m * 100)
             probe_cfg = replace(
                 base,

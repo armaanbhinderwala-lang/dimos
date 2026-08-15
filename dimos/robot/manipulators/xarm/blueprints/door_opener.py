@@ -75,10 +75,7 @@ def _build(sensor_module, profile: str, tool_mass_kg: float,
             tasks=[
                 # No gripper params here on purpose: they make eef_twist claim the gripper and
                 # hold it open every tick, which overrides the one-shot [ and ] key commands.
-                # 7 joints tracking a 6-DOF twist leaves one spare DOF. Unused, Pink walks it
-                # into a singularity around 50 deg of arc; centring spends it staying dexterous.
-                eef_twist_task(hardware, robot_model=control_model, timeout=0.0,
-                               control_ik={"joint_centering_cost": 1e-3}),
+                eef_twist_task(hardware, robot_model=control_model, timeout=0.0),
                 # [ and ] publish a JointState on joint_command, and routing delivers that
                 # only to `servo` tasks. Without this the gripper keys do nothing.
                 TaskConfig(
