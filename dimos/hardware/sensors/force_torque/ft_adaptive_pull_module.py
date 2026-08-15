@@ -129,6 +129,8 @@ class FTAdaptivePullConfig(ModuleConfig):
     # this and door_radius_m are set the arc is fully known and the probe fit is not used at
     # all -- an 8cm probe cannot resolve which side the hinge is on, but you can just look.
     hinge_direction_world: tuple[float, float, float] | None = None
+    # Constraint force needed before the hinge direction is trusted, well over the sensor floor.
+    min_hinge_force_n: float = 8.0
     hinge_axis_world: tuple[float, float, float] = (0.0, 0.0, 1.0)
     # Ceiling on the adaptive cutoff, so a probe that already fought hard cannot authorise a
     # force that damages the door.
@@ -195,6 +197,7 @@ class PhaseStats:
     stop_reason: str = ""
     min_sigma: float = float("inf")  # smallest manipulability seen this phase
     tool_path: list = dataclass_field(default_factory=list)  # EE positions, for fit_hinge
+    force_world_sum: list = dataclass_field(default_factory=lambda: [0.0, 0.0, 0.0])
 
 
 class FTAdaptivePullModule(Module):
@@ -448,6 +451,8 @@ class FTAdaptivePullModule(Module):
             # This path is what fit_hinge later reads the door's circle from.
             position = np.asarray(pose.translation).copy()
             stats.tool_path.append(position)
+            f_w = ee_rot @ np.asarray(force_tool, float)
+            stats.force_world_sum = [a + b for a, b in zip(stats.force_world_sum, f_w)]
             velocity = ((position - previous_position) / dt
                         if previous_position is not None else np.zeros(3))
             previous_position = position
@@ -533,6 +538,33 @@ class FTAdaptivePullModule(Module):
         )
         return stats
 
+    def _hinge_direction_from_force(self, probe) -> np.ndarray | None:
+        """Unit vector from grasp toward the hinge, read off the constraint force.
+
+        Dragging a hinged handle along a straight line pulls it off its arc, and the door
+        resists toward the hinge. That force runs to tens of newtons where the path curvature
+        a circle fit needs is a fraction of a millimetre, so this is the far stronger signal.
+        """
+        if len(probe.tool_path) < 5 or not probe.ticks:
+            return None
+        axis = np.asarray(self.config.hinge_axis_world, float)
+        axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+        travel = np.asarray(probe.tool_path[-1], float) - np.asarray(probe.tool_path[0], float)
+        travel = travel - np.dot(travel, axis) * axis
+        force = np.asarray(probe.force_world_sum, float) / probe.ticks
+        force = force - np.dot(force, axis) * axis
+        if np.linalg.norm(travel) < 1e-6 or np.linalg.norm(force) < self.config.min_hinge_force_n:
+            logger.info("Constraint force %.1fN is too small to locate the hinge.",
+                        float(np.linalg.norm(force)))
+            return None
+        t_hat = travel / np.linalg.norm(travel)
+        radial = force - np.dot(force, t_hat) * t_hat
+        if np.linalg.norm(radial) < self.config.min_hinge_force_n:
+            logger.info("Radial force %.1fN is too small to locate the hinge.",
+                        float(np.linalg.norm(radial)))
+            return None
+        return radial / np.linalg.norm(radial)
+
     def _swept_angle_deg(self, path: list) -> float:
         """Angle turned about the hinge so far, from the first recorded point."""
         if self._hinge_centre is None or len(path) < 2:
@@ -564,8 +596,17 @@ class FTAdaptivePullModule(Module):
 
         Returns the angle it expects to jam at, or None if the full swing is clear.
         """
-        if self.config.hinge_direction_world and self.config.door_radius_m:
-            d = np.asarray(self.config.hinge_direction_world, float)
+        measured = self._hinge_direction_from_force(probe)
+        configured = self.config.hinge_direction_world
+        if measured is not None and configured:
+            agree = float(np.dot(measured, np.asarray(configured, float)
+                                 / max(np.linalg.norm(configured), 1e-12)))
+            logger.info("Hinge direction: force says %s, config says %s -- %s (cos %.2f).",
+                        np.round(measured, 3).tolist(), list(configured),
+                        "AGREE" if agree > 0 else "DISAGREE", agree)
+        chosen = np.asarray(configured, float) if configured else measured
+        if chosen is not None and self.config.door_radius_m:
+            d = np.asarray(chosen, float)
             axis = np.asarray(self.config.hinge_axis_world, float)
             axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
             d = d - np.dot(d, axis) * axis
@@ -582,8 +623,9 @@ class FTAdaptivePullModule(Module):
                 result = self._check_arc(q, grasp, hinge, axis,
                                          np.radians(self.config.target_open_angle_deg))
                 logger.info(
-                    "Hinge taken from config: radius=%.3fm direction=%s axis=%s. Arc to %.0f deg "
+                    "Hinge from %s: radius=%.3fm direction=%s axis=%s. Arc to %.0f deg "
                     "-> worst sigma %.4f, worst joint margin %.3f rad.",
+                    "config" if configured else "measured force",
                     self.config.door_radius_m, np.round(d / np.linalg.norm(d), 3).tolist(),
                     np.round(axis, 3).tolist(), self.config.target_open_angle_deg,
                     result["worst_sigma"], result["worst_margin"],

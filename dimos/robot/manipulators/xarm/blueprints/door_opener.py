@@ -50,9 +50,9 @@ _ft_transports = {
 
 # Hinge-to-handle distance of the door being opened. Measure it; the probe cannot.
 DOOR_RADIUS_M = 0.368  # 14.5 in, hinge pin to handle
-# Unit vector from the handle toward the hinge, in the arm's base frame (+X forward, +Y left).
-# An 8cm probe cannot resolve which side the hinge is on; this is measured once by looking.
-HINGE_DIRECTION_WORLD = (0.0, 1.0, 0.0)
+# Left None, the hinge direction is read from the constraint force during the probe, so no
+# door needs describing up front. Set it to a unit vector only to override that.
+HINGE_DIRECTION_WORLD = None
 
 
 def _build(sensor_module, profile: str, tool_mass_kg: float,
