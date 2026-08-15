@@ -50,11 +50,15 @@ _ft_transports = {
 
 # Hinge-to-handle distance of the door being opened. Measure it; the probe cannot.
 DOOR_RADIUS_M = 0.368  # 14.5 in, hinge pin to handle
+# Unit vector from the handle toward the hinge, in the arm's base frame (+X forward, +Y left).
+# An 8cm probe cannot resolve which side the hinge is on; this is measured once by looking.
+HINGE_DIRECTION_WORLD = (0.0, 1.0, 0.0)
 
 
 def _build(sensor_module, profile: str, tool_mass_kg: float,
            force_axis_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
-           door_radius_m: float | None = DOOR_RADIUS_M):
+           door_radius_m: float | None = DOOR_RADIUS_M,
+           hinge_direction_world: tuple[float, float, float] | None = HINGE_DIRECTION_WORLD):
     hardware = xarm7_hardware("arm", gripper=True, mock_without_address=True)
     # add_gripper=False makes the tip frame "link7"; the pull module must name the same frame
     # or its FK describes a different point than the one being moved.
@@ -97,6 +101,7 @@ def _build(sensor_module, profile: str, tool_mass_kg: float,
             tool_mass_kg=tool_mass_kg,
             force_axis_weights=force_axis_weights,
             door_radius_m=door_radius_m,
+            hinge_direction_world=hinge_direction_world,
             auto_run=False,
         ),
         WrenchPlotter.blueprint(),

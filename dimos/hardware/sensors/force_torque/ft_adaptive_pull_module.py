@@ -125,6 +125,14 @@ class FTAdaptivePullConfig(ModuleConfig):
     follow_ramp_m: float = 0.02
     # Accept the fitted hinge direction only this close to perpendicular (cos of the angle off).
     max_hinge_direction_cos: float = 0.5
+    # Unit vector from the grasp toward the hinge, in base frame, and the hinge axis. When both
+    # this and door_radius_m are set the arc is fully known and the probe fit is not used at
+    # all -- an 8cm probe cannot resolve which side the hinge is on, but you can just look.
+    hinge_direction_world: tuple[float, float, float] | None = None
+    hinge_axis_world: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    # Ceiling on the adaptive cutoff, so a probe that already fought hard cannot authorise a
+    # force that damages the door.
+    max_force_cutoff_n: float = 60.0
 
     # Phase 2: execute. Deliberately slow -- "human-like," not scaled by how
     # heavy the door is; the calibrated cutoffs below are what adapts to the
@@ -556,6 +564,37 @@ class FTAdaptivePullModule(Module):
 
         Returns the angle it expects to jam at, or None if the full swing is clear.
         """
+        if self.config.hinge_direction_world and self.config.door_radius_m:
+            d = np.asarray(self.config.hinge_direction_world, float)
+            axis = np.asarray(self.config.hinge_axis_world, float)
+            axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+            d = d - np.dot(d, axis) * axis
+            if np.linalg.norm(d) < 1e-6:
+                logger.error("hinge_direction_world is parallel to the hinge axis -- ignoring it.")
+            else:
+                state = self._get_state()
+                if state is None:
+                    return None
+                _, q = state
+                grasp = np.asarray(self._forward_kinematics(q).translation)
+                hinge = grasp + d / np.linalg.norm(d) * self.config.door_radius_m
+                self._hinge_centre, self._hinge_axis = hinge, axis
+                result = self._check_arc(q, grasp, hinge, axis,
+                                         np.radians(self.config.target_open_angle_deg))
+                logger.info(
+                    "Hinge taken from config: radius=%.3fm direction=%s axis=%s. Arc to %.0f deg "
+                    "-> worst sigma %.4f, worst joint margin %.3f rad.",
+                    self.config.door_radius_m, np.round(d / np.linalg.norm(d), 3).tolist(),
+                    np.round(axis, 3).tolist(), self.config.target_open_angle_deg,
+                    result["worst_sigma"], result["worst_margin"],
+                )
+                if result["blocked_at"] is not None:
+                    logger.warning("Arc blocked at %.0f deg (%s).",
+                                   np.degrees(result["blocked_at"]), result["blocked_by"])
+                else:
+                    logger.info("Arc is clear for the full %.0f degrees.",
+                                self.config.target_open_angle_deg)
+                return result
         if len(probe.tool_path) < 5:
             logger.info("Arc check skipped: probe recorded only %d points.", len(probe.tool_path))
             return None
@@ -663,6 +702,7 @@ class FTAdaptivePullModule(Module):
                 force_cutoff = min(
                     max(probe.peak_resistance_force * self.config.cutoff_safety_margin, self.config.min_force_cutoff),
                     SENSOR_FORCE_OVERLOAD_N * 0.8,
+                    self.config.max_force_cutoff_n,
                 )
                 torque_cutoff = min(
                     max(probe.peak_torque * self.config.cutoff_safety_margin, self.config.min_torque_cutoff),

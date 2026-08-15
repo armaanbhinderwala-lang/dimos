@@ -272,7 +272,11 @@ def compute_hybrid_twist(
     else:
         linear = speed * tangent
 
-    omega = -cfg.k_rot * m_world
+    # Hand rotation over from torque compliance to geometry as following ramps in. Compliance
+    # is a trim term -- on this sensor it reached 0.11 rad/s against the 0.054 the arc wanted,
+    # and its mz row is uncalibrated, so letting it run alongside fights the arc.
+    follow_now = float(np.clip(follow_scale, 0.0, 1.0)) if hinge_to_grasp_world is not None else 0.0
+    omega = -(1.0 - follow_now) * cfg.k_rot * m_world
     # Turn the gripper WITH the door. A body rotating about a hinge satisfies v = w x r, so
     # w = (r x v) / |r|^2 -- exact, and the sign falls out of the geometry. A gripper that only
     # translates along the arc makes the wrist absorb the whole rotation, which is what drove
