@@ -84,7 +84,14 @@ def _build(sensor_module, profile: str, tool_mass_kg: float,
             tasks=[
                 # No gripper params here on purpose: they make eef_twist claim the gripper and
                 # hold it open every tick, which overrides the one-shot [ and ] key commands.
-                eef_twist_task(hardware, robot_model=control_model, timeout=0.0),
+                # The door turns about world Z and so must the gripper. posture_cost pins the
+                # arm to a reference posture, so joint6 absorbs the whole rotation and stops the
+                # pull around 60 deg. Drop it and let joint1 -- a base yaw about world Z with
+                # +-178 deg of range -- take a share. Damping replaces it as the regulariser:
+                # it penalises joint velocity and has no target, so unlike joint centring it
+                # cannot buy posture with task error (that is what lifted the microwave).
+                eef_twist_task(hardware, robot_model=control_model, timeout=0.0,
+                               control_ik={"posture_cost": 0.0, "damping_cost": 1e-3}),
                 # [ and ] publish a JointState on joint_command, and routing delivers that
                 # only to `servo` tasks. Without this the gripper keys do nothing.
                 TaskConfig(
