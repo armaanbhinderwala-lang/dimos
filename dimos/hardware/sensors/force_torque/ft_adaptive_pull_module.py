@@ -471,7 +471,11 @@ class FTAdaptivePullModule(Module):
             if self.config.use_hybrid_law:
                 # Known only after the probe, so the probe itself pulls straight and the
                 # execute phase follows the arc.
+                # A hinge is fixed in space. Refitting mid-pull moves it onto whatever the
+                # recent path looks like, so the arm chases a new arc every 25 ticks and the
+                # door never accumulates angle. With a measured radius, commit to the arc.
                 if (self._hinge_centre is not None and self.config.refit_hinge_every_ticks
+                        and not self.config.door_radius_m
                         and stats.ticks and stats.ticks % self.config.refit_hinge_every_ticks == 0):
                     self._refit_hinge(stats.tool_path)
                 swept = self._swept_angle_deg(stats.tool_path)
