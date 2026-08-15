@@ -40,6 +40,11 @@ from dimos.teleop.keyboard.keyboard_teleop_module import KeyboardTeleopModule
 from dimos.visualization.wrench_plotter import WrenchPlotter
 
 DIY_TOOL_MASS_KG = 0.85  # gravity comp for sensors that do not do it themselves
+# Tool centre of mass from the sensor, along the tool axis. Left at zero the moment term
+# cross(com, force) is identically zero, so the gripper and camera weight is removed from the
+# force and none of it from the torque -- a pose-varying m*g*d bias that spends the torque
+# safety budget before the door does. Measure it properly; this is a stand-in.
+DIY_TOOL_COM_M = (0.0, 0.0, 0.06)
 
 _ft_transports = {
     ("ext_wrench", WrenchStamped): LCMTransport("/ft/ext_wrench", WrenchStamped),
@@ -58,6 +63,7 @@ HINGE_DIRECTION_WORLD = (0.0, -1.0, 0.0)
 
 
 def _build(sensor_module, profile: str, tool_mass_kg: float,
+           tool_com_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
            force_axis_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
            door_radius_m: float | None = DOOR_RADIUS_M,
            hinge_direction_world: tuple[float, float, float] | None = HINGE_DIRECTION_WORLD):
@@ -101,6 +107,7 @@ def _build(sensor_module, profile: str, tool_mass_kg: float,
             xacro_args=control_model.xacro_args,
             tool_frame_name="link7",
             tool_mass_kg=tool_mass_kg,
+            tool_com_m=tool_com_m,
             force_axis_weights=force_axis_weights,
             door_radius_m=door_radius_m,
             hinge_direction_world=hinge_direction_world,
@@ -129,5 +136,6 @@ door_opener_xarm7_diy = _build(
     OpenFTSensor.blueprint(),
     profile="diy",
     tool_mass_kg=DIY_TOOL_MASS_KG,
+    tool_com_m=DIY_TOOL_COM_M,
     force_axis_weights=(1.0, 1.0, 0.0),
 )

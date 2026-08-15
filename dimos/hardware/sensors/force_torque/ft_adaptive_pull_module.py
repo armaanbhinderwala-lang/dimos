@@ -104,6 +104,9 @@ class FTAdaptivePullConfig(ModuleConfig):
     probe_distance_m: float = 0.08  # m -- stop the probe here even if never resisted
     probe_min_ticks: int = 20  # enough force samples to average before trusting the direction
     probe_min_distance_m: float = 0.04  # and enough travel for the constraint to actually build
+    # Travel before the assumed hinge side is judged, and how much radius growth is tolerated.
+    side_check_distance_m: float = 0.03
+    side_check_tolerance: float = 1.08
     probe_max_duration: float = 8.0  # s, safety net independent of distance
 
     # A fitted radius outside this range is not believable for an appliance door; the pull
@@ -217,6 +220,7 @@ class FTAdaptivePullModule(Module):
     _latest_wrench: np.ndarray | None = None  # [Fx,Fy,Fz,Mx,My,Mz], tool frame
     _latest_q: np.ndarray | None = None
     _following_logged: bool = False
+    _side_checked: bool = False
     _hinge_centre: Any = None
     _hinge_axis: Any = None
     _pin_model: Any = None
@@ -529,6 +533,26 @@ class FTAdaptivePullModule(Module):
                                  / max(self.config.follow_ramp_m, 1e-6), 0.0, 1.0)
                 to_grasp = (position - np.asarray(self._hinge_centre)
                             if self._hinge_centre is not None and follow > 0.0 else None)
+                # Verify the side against the door itself. On the true hinge the radius is
+                # constant; assume the wrong side and it opens away, so the distance to the
+                # assumed centre climbs at once. Cheaper and surer than trusting a sign.
+                if (to_grasp is not None and not self._side_checked
+                        and stats.distance_covered >= self.config.side_check_distance_m):
+                    self._side_checked = True
+                    now = float(np.linalg.norm(to_grasp))
+                    want = float(self.config.door_radius_m or now)
+                    if now > want * self.config.side_check_tolerance:
+                        centre = np.asarray(self._hinge_centre, float)
+                        self._hinge_centre = 2.0 * position - centre
+                        self._hinge_axis = -np.asarray(self._hinge_axis, float)
+                        logger.warning(
+                            "Hinge side was wrong: radius grew %.3fm -> %.3fm over %.1fcm. "
+                            "Mirroring the hinge to the other side and continuing.",
+                            want, now, stats.distance_covered * 100)
+                        to_grasp = position - self._hinge_centre
+                    else:
+                        logger.info("Hinge side confirmed: radius held %.3fm over %.1fcm.",
+                                    now, stats.distance_covered * 100)
                 if to_grasp is not None and not self._following_logged:
                     self._following_logged = True
                     logger.info(
