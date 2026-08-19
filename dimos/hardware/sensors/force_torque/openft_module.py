@@ -60,8 +60,13 @@ def parse_frame(line: str) -> list[float] | None:
     Shared with the calibration collector so the driver and the data it is
     calibrated against can never disagree about the wire format.
     """
-    # The firmware terminates each frame with a trailing comma.
+    # The firmware terminates each frame with a trailing comma. Newer firmware also
+    # prepends a microsecond timestamp, so accept both widths -- a driver that rejects
+    # every frame after a flash goes silent rather than failing, which is how a whole
+    # session ran with a dead sensor.
     values = [v for v in line.strip().rstrip(",").split(",") if v]
+    if len(values) == CHANNELS + 1:
+        values = values[1:]
     if len(values) != CHANNELS:
         return None
     try:
@@ -110,6 +115,7 @@ class OpenFTSensor(Module):
 
     _serial: object | None = None
     _running: bool = False
+    _dropped: int = 0
 
     @rpc
     def start(self) -> None:
@@ -231,8 +237,17 @@ class OpenFTSensor(Module):
 
         parsed = parse_frame(line)
         if parsed is None:
-            logger.debug("OpenFTSensor: dropped frame %r", line)
+            # Warn once a run, not once a frame. Silent per-frame drops let a firmware
+            # change take the sensor offline without anything appearing in the log.
+            self._dropped += 1
+            if self._dropped in (1, 100) or self._dropped % 1000 == 0:
+                logger.warning(
+                    "OpenFTSensor: %d frames rejected -- the sensor is not being read. "
+                    "Wire format may have changed. Last line: %r",
+                    self._dropped, line[:120],
+                )
             return None
+        self._dropped = 0
 
         for buffer, value in zip(self._buffers, parsed, strict=True):
             buffer.append(value)

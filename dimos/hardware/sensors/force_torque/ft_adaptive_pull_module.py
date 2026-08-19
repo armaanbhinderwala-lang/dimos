@@ -147,7 +147,9 @@ class FTAdaptivePullConfig(ModuleConfig):
     # Phase 2: execute. Deliberately slow -- "human-like," not scaled by how
     # heavy the door is; the calibrated cutoffs below are what adapts to the
     # door, not the pace.
-    execute_speed: float = 0.02  # m/s
+    # 0.012, was 0.02. Force is stiffness x error and error grows with distance travelled,
+    # so going slower both lowers the peak load and gives the radial compliance time to act.
+    execute_speed: float = 0.012  # m/s
     # This is LINEAR drive-direction travel, not an opening angle -- arc length
     # ~= handle_radius * angle, so the same distance target covers proportionally
     # less angle on a wide-swing door (found in sim_multi_door_test.py: a

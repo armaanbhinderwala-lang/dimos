@@ -129,15 +129,23 @@ class AdmittanceConfig:
     # zeroing Fz there deletes the axis the door actually travels along.
     force_axis_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
-    contact_force_n: float = 3.0        # radial load below this needs no correction
+    # Radial load below this is ignored. Raised from 3.0: after the deadband the residual
+    # noise is a few newtons, and with the compliance gain raised, chasing it would jitter.
+    contact_force_n: float = 8.0
     min_motion_speed: float = 0.003     # m/s, below this motion is too slow to read a tangent from
-    desired_radial_force: float = 5.0   # N, small but nonzero -- keeps the grasp loaded
+    # 0.0, not 5.0: while the door is moving there is no reason to hold a sideways load
+    # against it. Maintaining 5 N is 5 N the appliance has to resist.
+    desired_radial_force: float = 0.0
     k_force: float = 0.004              # (m/s)/N, how hard radial force error is corrected
     # Radial correction is capped at this FRACTION of the tangential speed. Hardware ran at
     # 10-33 N against a 12 N saturation point, so the arm retreated radially as fast as it
     # advanced -- which walks the gripper toward the hinge and folds the door shut. Bounding
     # it relatively keeps forward progress guaranteed however wrong the radial estimate is.
-    max_radial_fraction: float = 0.4
+    # 1.5, was 0.4. At 0.4 this clip -- not k_force -- was what made the arm stiff sideways:
+    # a 20 N error asks for 60 mm/s of relief and was allowed 8. The arm behaved like
+    # ~14,000 N/m where a human hand is ~100 N/m, so any error in the arc became force on
+    # the appliance rather than motion.
+    max_radial_fraction: float = 1.5
 
 
 @dataclass
