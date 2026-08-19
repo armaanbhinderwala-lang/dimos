@@ -1,0 +1,8 @@
+key,value
+baud,115200
+calibration_file,dimos/hardware/ft_calibration.json
+created_at,2026-08-19 11:28:49
+created_ts,1787164129.0117557
+homemade_port,/dev/ttyACM0
+session_type,fast
+xarm_ip,192.168.1.197
