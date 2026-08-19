@@ -112,6 +112,8 @@ LABEL_INSTRUCTIONS = {
 def parse_frame(line: str) -> list[float] | None:
     """Same wire format as openft_module.py -- 16 comma-separated channels, trailing comma."""
     values = [v for v in line.strip().rstrip(",").split(",") if v]
+    if len(values) == CHANNELS + 1:   # newer firmware prepends a microsecond timestamp
+        values = values[1:]
     if len(values) != CHANNELS:
         return None
     try:
